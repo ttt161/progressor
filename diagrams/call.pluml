@@ -1,0 +1,23 @@
+@startuml
+
+participant AC
+
+box "Progressor" #LightBlue
+participant AS
+participant PC
+end box
+
+participant PS
+
+AC -> AS : Automaton.Call(CallArgs)
+
+PC -> PS : Processor.ProcessCall(State,CallArgs)
+PC <- PS : CallResult(CallResponse,Changes,[Action])
+
+note over AS, PC #FFAAAA: store changes
+note over AS, PC #FFAAAA: schedule action
+note over AS, PC #FFAAAA: notify
+
+AC <- AS : CallResponse
+
+@enduml

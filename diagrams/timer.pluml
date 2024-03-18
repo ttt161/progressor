@@ -1,0 +1,18 @@
+@startuml
+
+box "Progressor" #LightBlue
+participant AS
+participant PC
+end box
+
+participant PS
+
+note over AS, PC #FFAAAA: sceduled action start
+PC -> PS : Processor.ProcessSignal(State,TimeoutArgs)
+PC <- PS : SignalResult(Changes,[Action])
+
+note over AS, PC #FFAAAA: store changes
+note over AS, PC #FFAAAA: schedule action
+note over AS, PC #FFAAAA: notify
+
+@enduml
