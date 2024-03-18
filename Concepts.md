@@ -64,11 +64,19 @@ Retry Policy - TODO
 
 ### Старт экземпляра процесса
 
+![start](https://github.com/ttt161/progressor/raw/main/diagrams/render/start.svg)
+
 ### Срабатывание таймера
+
+![timer](https://github.com/ttt161/progressor/raw/main/diagrams/render/timer.svg)
 
 ### Вызов процесса
 
+![call](https://github.com/ttt161/progressor/raw/main/diagrams/render/call.svg)
+
 ### Нотификация процесса
+
+![notify](https://github.com/ttt161/progressor/raw/main/diagrams/render/notify.svg)
 
 ### Получение состояния процесса
 
@@ -86,10 +94,5 @@ Retry Policy - TODO
 ### Восстановление после необрабатываемого сбоя процессора (repairing)
 
 ### Внутренний сбой управляющей машины
-(под этим сценарием подразумевается в первую очередь невозможность выполнить сохранение в базу или нотификацию в брокер, а не падение управляющей машины)
 
 ### Восстановление после внутреннего сбоя управляющей машины (???)
-
-
-
-
