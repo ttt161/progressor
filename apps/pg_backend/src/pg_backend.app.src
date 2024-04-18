@@ -1,0 +1,17 @@
+{application, pg_backend,
+ [{description, "An OTP application"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, {pg_backend_app, []}},
+  {applications,
+   [kernel,
+    stdlib,
+    epgsql,
+    epgsql_pool
+    ]},
+  {env,[]},
+  {modules, []},
+
+  {licenses, ["MIT"]},
+  {links, []}
+ ]}.
