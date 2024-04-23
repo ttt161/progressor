@@ -122,7 +122,13 @@ process_call(#{ns := NsId, ns_opts := NsOpts, id := Id, args := Args, type := Ty
     Task = make_task(#{process_id => Id, args => Args}),
     Ref = make_ref(),
     Type = make_type(Type0, Ref),
-    ok = prg_scheduler:push_task(NsId, Type, Task),
+    ok = sd_scheduler:send_task(prg_utils:registered_name(NsId, "_scheduler"), #{
+        id => Ref,
+        target_time => sd_queue_task:current_time(),
+        machine_id => Id,
+        %% Пардон за грязь
+        payload => {Type, Task}
+    }),
     %% see fun reply/2
     receive
         {Ref, Result} -> Result
@@ -131,8 +137,16 @@ process_call(#{ns := NsId, ns_opts := NsOpts, id := Id, args := Args, type := Ty
             {error, <<"timeout">>}
     end.
 
-process_signal(#{ns := NsId, type := Type, task := Task}) ->
-    ok = prg_scheduler:push_task(NsId, Type, Task).
+process_signal(#{ns := NsId, type := Type, task := Task, id := Id}) ->
+    %% Для уведомлений должна быть другая очередь с шедулингом и
+    %% другие правила выборки тасок. Для этого наверное нужно бы иметь
+    %% стоблец с типом в таблице хранящей таски.
+    ok = sd_scheduler:send_task(prg_utils:registered_name(NsId, "_scheduler"), #{
+        id => make_ref(),
+        target_time => sd_queue_task:current_time(),
+        machine_id => Id,
+        payload => {Type, Task}
+    }).
 
 make_type(init, Ref) ->
     {init, self(), Ref};

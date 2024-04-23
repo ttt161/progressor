@@ -6,7 +6,8 @@
   {applications,
    [kernel,
     stdlib,
-    jsx
+    jsx,
+    shoe_dealer
    ]},
   {env,[]},
   {modules, []},

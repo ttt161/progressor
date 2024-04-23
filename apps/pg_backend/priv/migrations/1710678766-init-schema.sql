@@ -1,7 +1,7 @@
 -- migrations/1710678766-init-schema.sql
 -- :up
 -- Up migration
-CREATE TYPE process_status AS ENUM ('running', 'error', 'finished');
+CREATE TYPE process_status AS ENUM ('waiting', 'running', 'error', 'finished');
 
 CREATE TABLE IF NOT EXISTS default_processes(
     "process_id" VARCHAR(80) PRIMARY KEY,
@@ -36,3 +36,4 @@ CREATE TABLE IF NOT EXISTS default_timers(
 DROP TABLE default_timers;
 DROP TABLE default_events;
 DROP TABLE default_processes;
+DROP TYPE process_status;

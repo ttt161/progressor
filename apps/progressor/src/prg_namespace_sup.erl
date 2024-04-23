@@ -25,23 +25,14 @@ start_link({NsId, _} = NS) ->
 %%% Supervisor callbacks
 %%%===================================================================
 
-init({NsId, _NsOpts} = NS) ->
+init({NsId, NsOpts}) ->
     MaxRestarts = 1000,
     MaxSecondsBetweenRestarts = 3600,
     SupFlags = #{strategy => one_for_all,
         intensity => MaxRestarts,
         period => MaxSecondsBetweenRestarts},
-    SchedulerSpec = #{
-        id => prg_utils:registered_name(NsId, "_scheduler"),
-        start => {prg_scheduler, start_link, [NS]}
-    },
-    WorkerSupSpec = #{
-        id => prg_utils:registered_name(NsId, "_worker_sup"),
-        start => {prg_worker_sup, start_link, [NS]},
-        type => supervisor
-    },
+    SchedulerSpec = scheduler_spec(NsId, NsOpts),
     Specs = [
-        WorkerSupSpec,
         SchedulerSpec
     ],
 
@@ -50,3 +41,25 @@ init({NsId, _NsOpts} = NS) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+scheduler_spec(NsId, NsOpts) ->
+    QueueHandler = {prg_generic_queue, maps:merge(maps:from_list(NsOpts), #{
+        ns_id => NsId,
+        processing_timeout => 60000,
+        min_scan_delay => 1000,
+        lookahead => 60
+    })},
+    SchedulerOptions = #{
+        start_interval => 1000,
+        capacity => 3500,
+        queue_handler => QueueHandler,
+        max_scan_limit => 2000,
+        scan_ahead => {1.0, 0},
+        retry_scan_delay => 1000,
+        task_handler => QueueHandler
+    },
+    sd_scheduler_sup:child_spec(
+        prg_utils:registered_name(NsId, "_scheduler"),
+        SchedulerOptions,
+        {scheduler, NsId}
+    ).

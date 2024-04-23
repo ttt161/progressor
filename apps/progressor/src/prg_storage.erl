@@ -4,6 +4,7 @@
 
 %% Task management
 -export([search_tasks/2]).
+-export([search_waiting_timer_tasks/5]).
 -export([save_task/3]).
 -export([delete_task/3]).
 %% Process management
@@ -17,6 +18,9 @@
 -spec search_tasks(storage_opts(), namespace_id()) -> [task()].
 search_tasks(#{client := pg_backend, options := PgOpts}, NsId) ->
     pg_backend:search_tasks(maps:from_list(PgOpts), NsId).
+
+search_waiting_timer_tasks(#{client := pg_backend, options := PgOpts}, NsId, FromTs, ToTs, Limit) ->
+    pg_backend:search_waiting_timer_tasks(maps:from_list(PgOpts), NsId, FromTs, ToTs, Limit).
 
 -spec save_task(storage_opts(), namespace_id(), task()) -> ok.
 save_task(#{client := pg_backend, options := PgOpts}, NsId, Task) ->

@@ -6,6 +6,7 @@
 %% API
 -export([is_exists/3]).
 -export([search_tasks/2]).
+-export([search_waiting_timer_tasks/5]).
 -export([save_task/3]).
 -export([delete_task/3]).
 
@@ -33,6 +34,18 @@ is_exists(#{pool := Pool}, NsId, Id) ->
 search_tasks(#{pool := Pool}, NsId) ->
     Table = construct_table_name(NsId, "_timers"),
     {ok, Columns, Rows} = epgsql_pool:query(Pool, "SELECT * from " ++ Table),
+    to_maps(Columns, Rows, fun marshall_task/1).
+
+search_waiting_timer_tasks(#{pool := Pool}, NsId, FromTs, ToTs, Limit) ->
+    ProcessesTable = construct_table_name(NsId, "_processes"),
+    TimersTable = construct_table_name(NsId, "_timers"),
+    Query = ["SELECT t.* from ", TimersTable, " AS t ",
+             "INNER JOIN ", ProcessesTable, " AS p ON p.process_id = t.process_id ",
+             "WHERE p.status = $1 AND ",
+             "t.timestamp >= (to_timestamp($2) AT TIME ZONE 'UTC') AND ",
+             "t.timestamp <= (to_timestamp($3) AT TIME ZONE 'UTC') ",
+             "LIMIT $4"],
+    {ok, Columns, Rows} = epgsql_pool:query(Pool, Query, ["waiting", FromTs, ToTs, Limit]),
     to_maps(Columns, Rows, fun marshall_task/1).
 
 -spec save_task(pg_opts(), namespace_id(), task()) -> ok.
