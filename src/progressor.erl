@@ -57,6 +57,7 @@ call(Req) ->
             fun add_ns_opts/1,
             fun check_idempotency/1,
             fun(Data) -> check_process_status(Data, <<"running">>) end,
+            fun check_generation/1,
             fun add_task/1,
             fun(Data) -> prepare(fun prg_storage:prepare_call/4, Data) end,
             fun process_call/1
@@ -151,6 +152,16 @@ check_idempotency(#{idempotency_key := _IdempotencyKey} = Req) ->
         Result -> {break, Result}
     end;
 check_idempotency(Req) ->
+    Req.
+
+check_generation(#{generation := Generation, ns_opts := #{storage := StorageOpts}, ns := NsId, id := Id} = Req) when
+    is_integer(Generation)
+->
+    case prg_storage:get_process(internal, StorageOpts, NsId, Id, Generation) of
+        {ok, _Process} -> Req;
+        {error, _} = Error -> Error
+    end;
+check_generation(Req) ->
     Req.
 
 add_task(#{id := Id, type := Type} = Req) ->

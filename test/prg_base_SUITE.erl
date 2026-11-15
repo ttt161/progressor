@@ -18,6 +18,7 @@
 -export([reschedule_after_call_test/1]).
 -export([simple_repair_after_call_error_test/1]).
 -export([simple_call_with_generation_test/1]).
+-export([missing_generation_test/1]).
 -export([call_replace_timer_test/1]).
 -export([call_unset_timer_test/1]).
 -export([postponed_call_test/1]).
@@ -96,6 +97,7 @@ groups() ->
             simple_call_test,
             reschedule_after_call_test,
             simple_call_with_generation_test,
+            missing_generation_test,
             call_replace_timer_test,
             call_unset_timer_test,
             postponed_call_test,
@@ -176,6 +178,40 @@ simple_call_with_generation_test(C) ->
     unmock_processor(),
     ok.
 %%
+-spec missing_generation_test(_) -> _.
+missing_generation_test(C) ->
+    MockProcessor = fun
+        ({init, <<"init_args">>, _Process}, _Opts, _Ctx) ->
+            {ok, #{state => state()}};
+        ({call, <<"call_args">>, #{state := #{generation := 1}}}, _Opts, _Ctx) ->
+            {ok, #{state => state(), response => <<"response">>}}
+    end,
+    _ = mock_processor(missing_generation_test, MockProcessor),
+    try
+        Id = gen_id(),
+        Req = #{ns => ?NS(C), id => Id},
+        {ok, ok} = progressor:init(Req#{args => <<"init_args">>}),
+        timer:sleep(?AWAIT_TIMEOUT(C)),
+        {ok, ?PROCESS_EXPECTED(Id, 1, 1, <<"running">>)} = progressor:get(Req),
+        {ok, InitialTrace} = progressor:trace(Req),
+        ?assertMatch([#{task_type := <<"init">>}], InitialTrace),
+        ?assertEqual({error, {generation_not_found, 2}}, progressor:get(Req#{generation => 2})),
+        Call = Req#{args => <<"call_args">>, idempotency_key => gen_id()},
+        ?assertEqual({error, {generation_not_found, 2}}, progressor:call(Call#{generation => 2})),
+        ?assertEqual({ok, InitialTrace}, progressor:trace(Req)),
+        ?assertEqual(1, meck:num_calls(prg_ct_processor, process, '_')),
+        {ok, ?PROCESS_EXPECTED(Id, 1, 1, <<"running">>)} = progressor:get(Req),
+        %% A rejected request must not consume its idempotency key.
+        {ok, <<"response">>} = progressor:call(Call#{generation => 1}),
+        timer:sleep(?AWAIT_TIMEOUT(C)),
+        {ok, ?PROCESS_EXPECTED(Id, 2, 2, <<"running">>)} = progressor:get(Req),
+        {ok, [#{task_type := <<"init">>}, #{task_type := <<"call">>, generation := 1}]} = progressor:trace(Req),
+        ?assertEqual(2, meck:num_calls(prg_ct_processor, process, '_'))
+    after
+        unmock_processor()
+    end,
+    ok.
+
 -spec call_replace_timer_test(_) -> _.
 call_replace_timer_test(C) ->
     %% steps:

@@ -141,8 +141,12 @@ get_process(Recipient, PgOpts, NsId, ProcessId, Generation) ->
         {ok, {ProcColumns, ProcRows}, {StateColumns, StateRows}} ->
             [Process] = to_maps(ProcColumns, ProcRows, fun prg_pg_utils:marshal_process/1),
             case to_maps(StateColumns, StateRows, fun prg_pg_utils:marshal_process_state/1) of
-                [] ->
+                [] when Generation =:= latest, not is_map_key(current_generation, Process) ->
                     {ok, Process};
+                [] when Generation =:= latest ->
+                    {error, {current_generation_not_found, maps:get(current_generation, Process)}};
+                [] ->
+                    {error, {generation_not_found, Generation}};
                 [ProcState] ->
                     {ok, Process#{state => ProcState}}
             end
