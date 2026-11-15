@@ -1,249 +1,144 @@
-# progressor
+# PostgreSQL backend
 
-## Использование
- TODO
+Этот документ описывает хранение и координацию задач в generational-реализации Progressor. Пользовательский API и пример процессора приведены в [README](README.md). Точные SQL-запросы находятся в [prg_pg_backend.erl](src/storage/postgres/prg_pg_backend.erl); исполняемая схема — в [priv/migrations](priv/migrations).
 
-## Мониторинг и логирование
+## Схема и миграции
 
-Доступны следующие метрики:
+Для каждого namespace создаются пять таблиц с префиксом его имени. Например, namespace `counters` использует `counters_processes`, `counters_tasks`, `counters_schedule`, `counters_running` и `counters_generations`.
 
-- TYPE progressor_calls_scanning_duration_ms histogram
-  HELP progressor_calls_scanning_duration_ms Calls (call, repair) scanning durations in millisecond
-- TYPE progressor_timers_scanning_duration_ms histogram
-  HELP progressor_timers_scanning_duration_ms Timers (timeout, remove) scanning durations in millisecond
-- TYPE progressor_zombie_collection_duration_ms histogram
-  HELP progressor_zombie_collection_duration_ms Zombie tasks collecting durations in millisecond
-- TYPE progressor_request_preparing_duration_ms histogram
-  HELP progressor_request_preparing_duration_ms Preparing request (init, call, repair) durations in millisecond
-- TYPE progressor_task_processing_duration_ms histogram
-  HELP progressor_task_processing_duration_ms Task processing durations in millisecond
-- TYPE progressor_task_completion_duration_ms histogram
-  HELP progressor_task_completion_duration_ms Task completion durations in millisecond
-- TYPE progressor_process_removing_duration_ms histogram
-  HELP progressor_process_removing_duration_ms Task completion durations in millisecond
-- TYPE progressor_notification_duration_ms histogram
-  HELP progressor_notification_duration_ms Notification durations in millisecond
+| Таблица | Назначение и ограничения |
+|---|---|
+| `processes` | Текущие атрибуты процесса: `status`, `previous_status`, `status_changed_at`, `aux_state`, `metadata`, `current_generation`, `detail`, `corrupted_by`. Первичный ключ — `process_id` |
+| `tasks` | Записи задач и результаты: тип, аргументы, контекст, времена, статус, ответ, параметры retry и входное `generation`. `task_id` — `BIGSERIAL`; `idempotency_key` уникален в namespace |
+| `schedule` | Ожидающие и заблокированные задачи; содержит данные, необходимые для запуска. Первичный ключ — `task_id` |
+| `running` | Захваченная задача процесса. Первичный ключ — `process_id`, поэтому две записи на один процесс недопустимы |
+| `generations` | Снимки: бинарный `payload`, timestamp, metadata и создавшая задача. Первичный ключ — `(process_id, generation)` |
 
-## Базовые сценарии
+`tasks` — история и результат, а `schedule`/`running` — оперативное состояние очереди. Во время выполнения не следует определять владельца задачи только по статусу в `tasks`: источником захвата служит `running`.
 
-Схема БД здесь: https://github.com/valitydev/progressor/blob/master/priv/schemas/postgres-schema.sql
+Идентификатор процесса и ключ идемпотентности имеют тип `VARCHAR(256)`. Номер поколения хранится как `INTEGER`. Времена — `TIMESTAMP WITH TIME ZONE`; API возвращает Unix-время в микросекундах. Снимки добавляются, но не обновляются обычным исполнением. Внешних ключей из `current_generation` и входного `generation` задач на снимки сейчас нет; ссылки снимков на процесс и породившую задачу защищены FK.
 
-### Старт экземпляра процесса
+`epg_migrator` применяет миграции отдельно для realm namespace. Начальная миграция сразу создаёт generational-схему, включая статусы и индексы с уникальными для таблиц именами. Здесь нет этапов преобразования event sourcing или совместного использования его таблиц. Разворачивайте этот продукт в отдельной БД от event-sourcing версии; SQL enum-типы также общие для namespace внутри БД.
+
+Автоматическое применение выполняется при старте namespace. `migration_enabled = false` позволяет отделить миграции от запуска приложения; тогда схема должна быть подготовлена заранее. Исполняемые миграции являются источником истины; исторический файл `priv/schemas/postgres-schema.sql` не предназначен для развёртывания этой реализации.
+
+## Пулы соединений
+
+В `storage.options` обязателен `pool`. Дополнительно можно указать:
+
+- `front_pool` — операции публичного API;
+- `scan_pool` — периодический поиск задач и zombie collection;
+- `cache` — идентификатор БД для чтения через ETS-кэш.
+
+При отсутствии отдельных пулов используется основной. Для одного namespace все пулы должны обращаться к одной и той же БД. Исполнение и проверка поколения перед `call` используют прямое чтение PostgreSQL.
+
+## Приём и захват задач
+
+### Инициализация
+
+`prepare_init` в одной транзакции создаёт процесс со статусом `init` и запись задачи. При наличии свободного воркера задача помещается в `running`; иначе — в `schedule`.
+
+До первого успешного завершения у процесса нет снимка и `current_generation`. Ошибка инициализации сохраняется частичным обновлением процесса без требования существующего поколения.
+
+### Внешний вызов
+
+API проверяет ключ идемпотентности, статус процесса и, если задан номер поколения, его существование. При отсутствии поколения возвращается `generation_not_found` до создания задачи. Эта предварительная проверка не является блокировкой процесса на всё время вызова.
+
+`prepare_call` сохраняет задачу и блокирует ожидающий таймер. Если запись `running` свободна и воркер доступен, задача захватывается; иначе остаётся в `schedule`. На завершении текущей задачи backend ищет ожидающий вызов по минимальному `task_id`. Это порядок записей очереди, а не гарантия порядка конкурентных сетевых запросов.
+
+Уникальность ключа идемпотентности обеспечивается в `tasks`. Проверка существующего результата и вставка нового запроса не являются одной операцией: одновременные первые запросы могут столкнуться с `unique_violation`. Ключ не обеспечивает атомарность внешних действий обработчика.
+
+### Scanner и локальные таймеры
+
+Scanner выбирает ожидающие вызовы и наступившие таймеры. Перенос из `schedule` в `running` выполняется транзакционно. Локальное сообщение таймера содержит идентификатор задачи, после чего worker вызывает `capture_task`.
+
+`capture_task` проверяет `status = waiting`, использует блокировку строки и переносит задачу в `running`. Отменённую, заблокированную или уже забранную задачу нельзя запускать на основании одного локального сообщения. Конкуренция со scanner и другими узлами разрешается транзакциями и ограничениями PostgreSQL; конфликт БД не даёт разрешения выполнить второго обработчика.
+
+Данные `generation` и `context` сохраняются при переносах между таблицами. Локальный таймер не является источником истины: потеря сообщения компенсируется поиском в БД. Возможны задержки и небольшое опережение срока; это не механизм точного real-time планирования.
+
+## Исполнение и завершение
+
+Обработчик выполняется вне SQL-транзакции. Worker читает выбранный снимок, вызывает `process/3` через sidecar и получает результат. Sidecar проверяет обязательный снимок до передачи успешного результата worker; исключение — немедленное удаление.
 
 ```mermaid
 sequenceDiagram
-    box Client
-    participant Client
-    end
-    box Grey Progressor
-    participant API_Handler
-    participant Storage
+    participant API
+    participant DB as PostgreSQL
     participant Worker
-    end
-    box Processor
-    participant Process
-    end
-
-    Client->>+API_Handler: Start
-    API_Handler->>+Storage: PrepareInit
-    Storage->>-API_Handler: TaskId
-    API_Handler->>+Worker: ProcessTask
-    Worker->>+Process: Process
-    Process->>-Worker: Result
-    Worker->>+Storage: SaveResult
-    Storage->>-Worker: OK
-    Worker->>API_Handler: Response
-    API_Handler->>-Client: Response
+    participant Processor
+    API->>DB: Подготовить и сохранить задачу
+    DB-->>API: Идентификатор и результат захвата
+    API->>Worker: Передать задачу
+    Worker->>DB: Прочитать процесс и снимок
+    Worker->>Processor: process/3
+    Processor-->>Worker: Снимок, действие, ответ
+    Worker->>DB: Транзакционно завершить шаг
+    DB-->>Worker: Commit и следующая задача
+    Worker-->>API: Ответ
 ```
 
-PrepareInit.sql
-```sql
--- сохраняем новый процесс
-INSERT INTO ProcessTable (process_id, status, detail, aux_state, metadata) VALUES ($1, $2, $3, $4, $5);
+Успешный шаг обычно фиксирует одной транзакцией:
 
--- сохраняем задачу в историческую таблицу
-INSERT INTO TaskTable
-  (process_id, task_type, status, scheduled_time, running_time, args, metadata, idempotency_key,
-    blocked_task, response, last_retry_interval, attempts_count, context)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING task_id;
+1. Частичное обновление атрибутов процесса и `current_generation`.
+2. Вставку снимка с номером `current_generation + 1`.
+3. Ответ, времена и входное поколение выполненной задачи.
+4. Освобождение её записи в `running`.
+5. Изменение таймера и, при наличии, захват следующего вызова.
 
--- сохраняем задачу как запущенную
-INSERT INTO RunningTable
-  (task_id, process_id, task_type, status, scheduled_time, running_time, args, metadata,
-    last_retry_interval, attempts_count, context)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-  ON CONFLICT (process_id) DO NOTHING RETURNING task_id;
-```
-здесь и далее все примеры запросов выполняются транзакционно, то есть обернуты в BEGIN - COMMIT|ROLLBACK
+| Операция backend | Изменение расписания |
+|---|---|
+| `complete_and_continue` | Отменить старый таймер, сохранить новый; приоритет отдать ожидающему вызову, если он есть |
+| `complete_and_suspend` | Отменить таймер, сохранив возможность обработки ожидающих вызовов |
+| `complete_and_unlock` | Сохранить прежний таймер и разблокировать его, когда нет продолжения из очереди вызовов |
+| `complete_and_error` | Зафиксировать ошибку, отменить ожидающие вызовы и таймеры |
 
-В случае отсутствия свободных воркеров задача вместо RunningTable будет сохранена в ScheduleTable:
-```sql
--- сохраняем задачу как запланированную
-INSERT INTO ScheduleTable
-  (task_id, process_id, task_type, status, scheduled_time, args, metadata,
-    last_retry_interval, attempts_count, context)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING task_id;
-```
+Ошибочная попытка `timeout`, для которой разрешён retry, завершается через `complete_and_continue` без нового снимка. Создаётся новая задача повторной попытки с сохранённым контекстом и увеличенным счётчиком. Повторный таймер работает с последним состоянием; это не повтор на автоматически закреплённой старой версии.
 
-Следующий запрос представлен для случая, когда процессор запланировал следующий вызов с нулевым таймаутом
-(наиболее частый вариант)
+`remove_process` удаляет записи процесса во всех пяти таблицах транзакционно. После удаления его историю и результаты по ключам идемпотентности получить нельзя. Нет отдельного журнала удаления или встроенной политики retention поколений.
 
-SaveResult.sql
-```sql
--- обновляем процесс
-UPDATE ProcessesTable
-  SET status = $1, detail = $2, aux_state = $3, metadata = $4, corrupted_by = $5
-  WHERE process_id = $6;
+## Поколения и чтение
 
--- сохраняем события
-INSERT INTO EventsTable (process_id, task_id, event_id, timestamp, payload, metadata)
-  VALUES ($1, $2, $3, $4, $5, $6);
+Номер в задаче означает выбранное входное состояние. Успешная задача на старом поколении создаёт следующий номер после текущего, а не отдельную ветвь снимков. Это не compare-and-swap и не защита от логической перезаписи результата более новой команды.
 
--- отменяем ранее запланированные таймеры, так как получили новый
-WITH deleted_tasks as(
-  DELETE FROM ScheduleTable WHERE process_id = $1 AND task_type IN ('timeout', 'remove')
-    AND (status = 'waiting' OR status = 'blocked') RETURNING task_id
-  )
-  MERGE INTO TaskTable as tt USING deleted_tasks as dt ON tt.task_id = dt.task_id
-    WHEN MATCHED THEN UPDATE SET status = 'cancelled';
+| Ситуация при чтении | Ответ |
+|---|---|
+| Процесса нет | `{error, <<"process not found">>}` |
+| Явно выбранное поколение найдено | Процесс с этим снимком в `state` |
+| Явно выбранное поколение отсутствует | `{error, {generation_not_found, N}}` |
+| `latest`, первого снимка ещё нет и `current_generation` отсутствует | Процесс без ключа `state` |
+| `latest`, снимков нет, но `current_generation` задан | `{error, {current_generation_not_found, N}}` |
 
--- сохраняем новую задачу (вызов с нулевым таймаутом) в историческую таблицу
-INSERT INTO TaskTable
-  (process_id, task_type, status, scheduled_time, running_time, args, metadata, idempotency_key,
-    blocked_task, response, last_retry_interval, attempts_count, context)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING task_id;
+`latest` выбирает максимальное сохранённое поколение. Проверка отсутствия снимков не является полной проверкой целостности всех ссылок и номеров.
 
--- финализируем завершёную задачу
-WITH deleted AS(
-  DELETE FROM RunningTable WHERE process_id = $4
-)
-UPDATE TaskTable SET status = $1, response = $2, finished_time = $3 WHERE task_id = $5;
+Атрибуты процесса и снимок читаются отдельными SQL-запросами внутри транзакции. Backend не задаёт для этого чтения `REPEATABLE READ`: при обычном `READ COMMITTED` конкурентный commit может оказаться между запросами. Поэтому обход кэша не следует трактовать как атомарный снимок всей карты процесса на единственный момент времени.
 
--- проверяем не появились ли внешние вызовы за время процессинга
-WITH postponed_tasks AS (
-  DELETE FROM ScheduleTable WHERE task_id = (SELECT min(task_id) FROM ScheduleTable
-      WHERE process_id = $1 AND status = 'waiting' AND task_type IN ('call', 'repair'))
-    RETURNING task_id, process_id, task_type, 'running'::task_status as status, scheduled_time,
-      TO_TIMESTAMP($2, 'YYYY-MM-DD HH24:MI:SS') as running_time, args, metadata,
-      last_retry_interval, attempts_count, context
-  )
-INSERT INTO RunningTable (task_id, process_id, task_type, status, scheduled_time, running_time, args,
-  metadata, last_retry_interval, attempts_count, context) SELECT * FROM postponed_tasks RETURNING *;
+`trace/1` читает задачи с присоединёнными снимками. `generation` — входная версия задачи, `state_generation` — созданная; `state_timestamp`, `state_metadata`, `state_payload` описывают результат. У ошибки, отменённой задачи или задачи без созданного снимка этих выходных полей нет. Это диагностика сохранённых данных, не распределённый tracing.
 
--- сохраняем новую задачу как запущенную
--- при условии, что предыдущий запрос вернул пустую таблицу, иначе сохраняем как запланированную
-INSERT INTO RunningTable
-  (task_id, process_id, task_type, status, scheduled_time, running_time, args, metadata,
-    last_retry_interval, attempts_count, context)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-  ON CONFLICT (process_id) DO NOTHING RETURNING task_id;
-```
+## Завершение узла и восстановление
 
-### Вызов экземпляра процесса
+При штатном завершении worker хранит continuation в своём состоянии. Для ещё не выполненной continuation типа `timeout`/`remove` `terminate/2` пытается вызвать `reschedule_task`: убрать запись из `running` и вернуть ту же задачу в `schedule` со статусом `waiting`. Это best effort: аварийное завершение, принудительное убийство или недоступность БД могут помешать возврату.
 
-Аналогичен старту, но вместо PrepareInit - PrepareCall
-```mermaid
-sequenceDiagram
-    box Client
-    participant Client
-    end
-    box Grey Progressor
-    participant API_Handler
-    participant Storage
-    participant Worker
-    end
-    box Processor
-    participant Process
-    end
+Zombie collector обрабатывает записи, чьё `running_time` старше `process_step_timeout` плюс защитный интервал 5 секунд. Проверка периодическая, поэтому обнаружение не происходит точно на границе этого срока. Транзакция:
 
-    Client->>+API_Handler: Call
-    API_Handler->>+Storage: PrepareCall
-    Storage->>-API_Handler: TaskId
-    API_Handler->>+Worker: ProcessTask
-    Worker->>+Process: Process
-    Process->>-Worker: Result
-    Worker->>+Storage: SaveResult
-    Storage->>-Worker: OK
-    Worker->>API_Handler: Response
-    API_Handler->>-Client: Response
-```
+- удаляет просроченную запись из `running`;
+- помечает задачу ошибочной;
+- отменяет ожидающие задачи и очищает расписание процесса;
+- переводит процесс в `error` с `detail = <<"zombie detected">>` и `corrupted_by`.
 
-PrepareCall.sql
-```sql
--- сохраняем задачу в историческую таблицу
-INSERT INTO TaskTable
-  (process_id, task_type, status, scheduled_time, running_time, args, metadata, idempotency_key,
-    blocked_task, response, last_retry_interval, attempts_count, context)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING task_id;
+Collector не доказывает, что прежний исполнитель прекратил внешнюю работу, и не выполняет её повторно автоматически. Восстановление через `repair` или `simple_repair` должно учитывать возможные уже выполненные эффекты. У внешних сервисов нужны собственные идемпотентные операции или fencing, если этого требует сценарий.
 
--- блокируем таймеры на время обработки внешнего вызова
-UPDATE ScheduleTable SET status = 'blocked' WHERE task_type IN ('timeout', 'remove') AND
-  process_id = $1 AND status = 'waiting' RETURNING task_id;
+## Кэш логической репликации
 
--- сохраняем задачу как запущенную (если сработает ON CONFLICT, то сохраняем как запланированную)
-INSERT INTO RunningTable
-  (task_id, process_id, task_type, status, scheduled_time, running_time, args, metadata,
-    last_retry_interval, attempts_count, context)
-  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-  ON CONFLICT (process_id) DO NOTHING RETURNING task_id;
-```
+[prg_pg_cache](src/storage/postgres/prg_pg_cache.erl) подписывается на изменения `processes` и `generations` и поддерживает локальные ETS-таблицы. Требуются `wal_level=logical`, доступные replication slots/wal senders и права на публикации и репликацию. PostgreSQL-права следует подготовить отдельно от обычных DML-прав приложения.
 
-SaveResult.sql аналогичный предыдущему
+При промахе кэша чтение идёт в БД, включая случай, когда в ETS нет запрошенного поколения. При остановке репликации кэш очищается и пытается переподключиться. Это кэш изменений, а не полная предварительная загрузка всех процессов.
 
-### Сканирование задач
+Репликация асинхронна; успешный commit не означает немедленного обновления ETS. Записи процесса и его снимков обновляются отдельно, поэтому кэш не предоставляет атомарное чтение всей карты. Для обхода используйте `options => #{use_cache => false}`.
 
-SearchTimers.sql
-```sql
-WITH tasks_for_run as(
-  DELETE FROM ScheduleTable WHERE task_id IN
-    (SELECT task_id FROM ScheduleTable WHERE status = 'waiting' AND scheduled_time <= $1
-      AND task_type IN ('timeout', 'remove') AND process_id NOT IN (SELECT process_id FROM RunningTable )
-      ORDER BY scheduled_time ASC LIMIT $3)
-    RETURNING task_id, process_id, task_type, 'running'::task_status as status, scheduled_time,
-      TO_TIMESTAMP($2, 'YYYY-MM-DD HH24:MI:SS') as running_time, args, metadata,
-      last_retry_interval, attempts_count, context
-  )
-INSERT INTO RunningTable
-  (task_id, process_id, task_type, status, scheduled_time, running_time, args, metadata, last_retry_interval, attempts_count, context)
-  SELECT * FROM tasks_for_run RETURNING *;
-```
+Очистка ETS основана на неактивности процесса (по умолчанию 5 минут), а не на ограничении количества поколений. Активный процесс может накапливать много снимков в памяти; извлечение `latest` сейчас сортирует сохранённые поколения. При оценке нагрузки учитывайте размер payload, частоту шагов, память кэша и объём WAL.
 
-SearchCalls.sql
-```sql
-WITH tasks_for_run as(
-  DELETE FROM ScheduleTable WHERE task_id IN
-    (SELECT min(task_id) FROM ScheduleTable WHERE status = 'waiting' AND task_type IN ('init', 'call', 'repair')
-      AND process_id NOT IN (SELECT process_id FROM RunningTable )
-      GROUP BY process_id ORDER BY min ASC LIMIT $2
-    )
-    RETURNING task_id, process_id, task_type, 'running'::task_status as status, scheduled_time,
-      TO_TIMESTAMP($1, 'YYYY-MM-DD HH24:MI:SS') as running_time, args, metadata,
-      last_retry_interval, attempts_count, context
-  )
-INSERT INTO RunningTable
-  (task_id, process_id, task_type, status, scheduled_time, running_time, args, metadata, last_retry_interval, attempts_count, context)
-  SELECT * FROM tasks_for_run RETURNING *;
-```
+## Практические границы гарантий
 
-SearchCalls вызывается в 3 раз чаще, чем SearchTimers. Данные вызовы являются конкурентными. Уникальность запущенных
-процессов достигается за счет "INSERT INTO RunningTable" с первичным ключом, за счет этого, даже при нарушении изоляции,
-сможет быть выполнена только одна из конкурентных транзакций, а остальные будут откачены.
+Атомарность относится к транзакциям Progressor в PostgreSQL. Она не распространяется на код обработчика, HTTP, сообщения и другие БД. При неопределённом результате commit или потере исполнителя нельзя обещать exactly-once внешнего эффекта.
 
-### Сборка зомби-задач
-
-Зомби-задачи могут возникать при аварийном завершении работы ноды, когда приложение штатно не завершает задачу и она остаётся
-висеть в RunningTable.
-
-CollectZombie.sql
-```sql
-WITH zombie_tasks as (
-  DELETE FROM RunningTable WHERE running_time < $1
-    RETURNING process_id, task_id
-  ),
-  t1 AS (UPDATE TaskTable SET status = 'cancelled' WHERE process_id IN (SELECT process_id FROM zombie_tasks))
-  t2 AS (UPDATE TaskTable SET status = 'error', finished_time = $2 WHERE task_id IN (SELECT task_id FROM zombie_tasks))
-MERGE INTO ProcessesTable AS pt USING zombie_tasks AS zt ON pt.process_id = zt.process_id
-  WHEN MATCHED THEN UPDATE SET status = 'error', detail = 'zombie detected', corrupted_by = zt.task_id;
-```
-зомби-задачи переводятся в статус error, соответствующий процесс также переводится в статус error, а все запланированные
-задачи отменяются (cancelled)
+Распределённая работа также предполагает общую доступную БД, согласованные настройки namespace и синхронизированные часы узлов. Встроенные метрики отражают длительности подготовки, обработки, завершения, сканирования и обращения к кэшу; глубину очередей и размер таблиц следует наблюдать отдельно.
