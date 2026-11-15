@@ -1,6 +1,18 @@
 %%%
 %%% Base entities
 %%%
+-define(CLEAR_PROCESS_KEYS, [
+    process_id,
+    status,
+    detail,
+    aux_state,
+    metadata,
+    corrupted_by,
+    previous_status,
+    status_changed_at,
+    current_generation
+]).
+
 -type process() :: #{
     process_id := id(),
     status := process_status(),
@@ -9,7 +21,10 @@
     metadata => map(),
     state => process_state(),
     corrupted_by => task_id(),
-    current_generation => generation()
+    current_generation => explicit_generation(),
+    previous_status => process_status(),
+    created_at => timestamp_us(),
+    status_changed_at => timestamp_us()
 }.
 
 -type task() :: #{
@@ -17,9 +32,9 @@
     process_id := id(),
     task_type := task_type(),
     status := task_status(),
-    scheduled_time := timestamp_sec(),
-    running_time => timestamp_sec(),
-    finished_time => timestamp_sec(),
+    scheduled_time := timestamp_us(),
+    running_time => timestamp_us(),
+    finished_time => timestamp_us(),
     args => binary(),
     generation => generation(),
     metadata => map(),
@@ -36,7 +51,7 @@
         process_id := id(),
         task_id := task_id(),
         generation := generation(),
-        timestamp := timestamp_ms(),
+        timestamp := timestamp_us(),
         metadata => #{format => pos_integer()},
         payload := binary()
     }
@@ -54,6 +69,7 @@
     worker_pool_size => pos_integer(),
     process_step_timeout => timeout_sec(),
     task_scan_timeout => timeout_sec(),
+    call_scan_timeout => timeout_sec(),
     last_timer_repair => boolean()
 }.
 
@@ -136,15 +152,34 @@
 %%   (i.e., attempts are not exhausted, and the error is not marked as
 %%   non-retryable).
 
--type action() :: #{set_timer := timestamp_sec(), remove => true} | unset_timer.
+-type scheduled_action() :: timeout | remove.
+
+-type schedule() :: #{
+    %% Absolute unix time; unit is auto-detected on write (prg_utils:to_microseconds).
+    at := timestamp_us(),
+    action := scheduled_action()
+}.
+
+-type action() ::
+    idle
+    | suspend
+    | scheduled_action()
+    | {schedule, schedule()}.
+
+-type process_updates() :: #{process_id := id(), _ => _}.
+-type process_flat_trace() :: [map()].
 
 -type task_result() :: #{
+    generation => explicit_generation(),
+    running_time => timestamp_us(),
     task_id := task_id(),
     status := task_status(),
-    finished_time => timestamp_sec(),
+    finished_time => timestamp_us(),
     response => binary()
 }.
 
+-type timestamp_us() :: non_neg_integer().
+-type timeout_ms() :: non_neg_integer().
 -type timestamp_ms() :: non_neg_integer().
 -type timestamp_sec() :: non_neg_integer().
 -type timeout_sec() :: non_neg_integer().
@@ -153,6 +188,7 @@
 %%% Constants
 %%%
 -define(DEFAULT_STEP_TIMEOUT_SEC, 60).
+-define(DEFAULT_CALL_SCAN_TIMEOUT_SEC, 3).
 
 -define(DEFAULT_RETRY_POLICY, #{
     %% second
@@ -167,5 +203,8 @@
 
 -define(NEW_PROCESS(ID), #{
     process_id => ProcessId,
-    status => <<"running">>
+    status => <<"init">>,
+    previous_status => <<"init">>,
+    created_at => erlang:system_time(microsecond),
+    status_changed_at => erlang:system_time(microsecond)
 }).

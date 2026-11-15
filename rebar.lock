@@ -5,12 +5,17 @@
   1},
  {<<"epg_connector">>,
   {git,"https://github.com/valitydev/epg_connector.git",
-       {ref,"2e86da8083908d0d35a4eed3e2168c9ba6a8d04a"}},
+       {ref,"939a0d4ab3f7561a79b45381bbe13029d9263006"}},
+  0},
+ {<<"epg_migrator">>,
+  {git,"https://github.com/valitydev/epg_migrator.git",
+       {ref,"8633c43fb4d022355c1498c0effa9ecf4098a67f"}},
   0},
  {<<"epgsql">>,
   {git,"https://github.com/epgsql/epgsql.git",
        {ref,"28e9f84c95065a51e92baeb37d2cf1687fc4b9ce"}},
   1},
+ {<<"erlydtl">>,{pkg,<<"erlydtl">>,<<"0.14.0">>},1},
  {<<"jsone">>,{pkg,<<"jsone">>,<<"1.8.0">>},2},
  {<<"jsx">>,{pkg,<<"jsx">>,<<"3.1.0">>},1},
  {<<"prometheus">>,{pkg,<<"prometheus">>,<<"4.11.0">>},0},
@@ -18,12 +23,14 @@
  {<<"recon">>,{pkg,<<"recon">>,<<"2.5.6">>},0}]}.
 [
 {pkg_hash,[
+ {<<"erlydtl">>, <<"964B2DC84F8C17ACFAA69C59BA129EF26AC45D2BA898C3C6AD9B5BDC8BA13CED">>},
  {<<"jsone">>, <<"347FF1FA700E182E1F9C5012FA6D737B12C854313B9AE6954CA75D3987D6C06D">>},
  {<<"jsx">>, <<"D12516BAA0BB23A59BB35DCCAF02A1BD08243FCBB9EFE24F2D9D056CCFF71268">>},
  {<<"prometheus">>, <<"B95F8DE8530F541BD95951E18E355A840003672E5EDA4788C5FA6183406BA29A">>},
  {<<"quantile_estimator">>, <<"EF50A361F11B5F26B5F16D0696E46A9E4661756492C981F7B2229EF42FF1CD15">>},
  {<<"recon">>, <<"9052588E83BFEDFD9B72E1034532AEE2A5369D9D9343B61AEB7FBCE761010741">>}]},
 {pkg_hash_ext,[
+ {<<"erlydtl">>, <<"D80EC044CD8F58809C19D29AC5605BE09E955040911B644505E31E9DD8143431">>},
  {<<"jsone">>, <<"08560B78624A12E0B5E7EC0271EC8CA38EF51F63D84D84843473E14D9B12618C">>},
  {<<"jsx">>, <<"0C5CC8FDC11B53CC25CF65AC6705AD39E54ECC56D1C22E4ADB8F5A53FB9427F3">>},
  {<<"prometheus">>, <<"719862351AABF4DF7079B05DC085D2BBCBE3AC0AC3009E956671B1D5AB88247D">>},

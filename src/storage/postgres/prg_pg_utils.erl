@@ -28,6 +28,9 @@ marshal_process(Process) ->
             (<<"detail">>, Detail, Acc) -> Acc#{detail => Detail};
             (<<"aux_state">>, AuxState, Acc) -> Acc#{aux_state => AuxState};
             (<<"metadata">>, Meta, Acc) -> Acc#{metadata => Meta};
+            (<<"previous_status">>, Status, Acc) -> Acc#{previous_status => Status};
+            (<<"status_changed_at">>, Ts, Acc) -> Acc#{status_changed_at => Ts};
+            (<<"created_at">>, Ts, Acc) -> Acc#{created_at => Ts};
             (<<"current_generation">>, Gen, Acc) -> Acc#{current_generation => Gen};
             (<<"corrupted_by">>, CorruptedBy, Acc) -> Acc#{corrupted_by => CorruptedBy};
             (_, _, Acc) -> Acc
@@ -64,6 +67,7 @@ marshal_task(Task) ->
             (<<"status">>, Status, Acc) -> Acc#{status => Status};
             (<<"scheduled_time">>, Ts, Acc) -> Acc#{scheduled_time => Ts};
             (<<"running_time">>, Ts, Acc) -> Acc#{running_time => Ts};
+            (<<"finished_time">>, Ts, Acc) -> Acc#{finished_time => Ts};
             (<<"args">>, Args, Acc) -> Acc#{args => Args};
             (<<"generation">>, Gen, Acc) -> Acc#{generation => Gen};
             (<<"metadata">>, MetaData, Acc) -> Acc#{metadata => MetaData};
@@ -96,12 +100,12 @@ convert(_Type, Value) ->
 %% Internal functions
 
 daytime_to_unixtime({Date, {Hour, Minute, Second}}) when is_float(Second) ->
-    daytime_to_unixtime({Date, {Hour, Minute, trunc(Second)}});
+    daytime_to_unixtime({Date, {Hour, Minute, trunc(Second)}}) + round((Second - trunc(Second)) * 1000000);
 daytime_to_unixtime(Daytime) ->
     to_unixtime(calendar:datetime_to_gregorian_seconds(Daytime)).
 
 to_unixtime(Time) when is_integer(Time) ->
-    Time - ?EPOCH_DIFF.
+    (Time - ?EPOCH_DIFF) * 1000000.
 
 construct_table_name(NsId, Postfix) ->
     "\"" ++ erlang:atom_to_list(NsId) ++ Postfix ++ "\"".

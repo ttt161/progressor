@@ -8,6 +8,9 @@ services:
       context: .
       args:
         OTP_VERSION: $OTP_VERSION
+        USER_UID: $USER_UID
+        USER_GID: $USER_GID
+    user: "${USER_UID:-1000}:${USER_GID:-1000}"
     volumes:
       - .:$PWD
     hostname: progressor

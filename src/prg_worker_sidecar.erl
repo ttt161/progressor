@@ -34,6 +34,7 @@
 -record(prg_sidecar_state, {}).
 
 -define(DEFAULT_DELAY, 3000).
+-define(DEFENSE_INTERVAL_MS, 50).
 -define(PROCESSING_KEY, progressor_task_processing_duration_ms).
 -define(COMPLETION_KEY, progressor_task_completion_duration_ms).
 -define(REMOVING_KEY, progressor_process_removing_duration_ms).
@@ -44,10 +45,11 @@
 %% processor wrapper
 -spec process(pid(), timestamp_ms(), namespace_opts(), request(), context()) ->
     {ok, _Result} | {error, _Reason} | no_return().
-process(Pid, Deadline, #{namespace := NS} = NsOpts, {TaskType, _, _} = Request, Context) ->
+process(Pid, Deadline, #{namespace := NS} = NsOpts0, {TaskType, _, _} = Request, Context) ->
     Timeout = Deadline - erlang:system_time(millisecond),
+    NsOpts = add_handling_timeout(Timeout, NsOpts0),
     Fun = fun() ->
-        gen_server:call(Pid, {process, NsOpts, Request, Context}, Timeout)
+        gen_server:call(Pid, {process, NsOpts, Request, Context}, Timeout + ?DEFENSE_INTERVAL_MS)
     end,
     prg_utils:with_observe(Fun, ?PROCESSING_KEY, [NS, erlang:atom_to_list(TaskType)]).
 
@@ -58,7 +60,7 @@ process(Pid, Deadline, #{namespace := NS} = NsOpts, {TaskType, _, _} = Request, 
     storage_opts(),
     namespace_id(),
     task_result(),
-    process(),
+    process_updates(),
     process_state(),
     task()
 ) -> {ok, [task()]} | no_return().
@@ -81,7 +83,7 @@ complete_and_continue(Pid, _Deadline, StorageOpts, NsId, TaskResult, Process, Pr
     storage_opts(),
     namespace_id(),
     task_result(),
-    process(),
+    process_updates(),
     process_state()
 ) -> {ok, [task()]} | no_return().
 complete_and_suspend(Pid, _Deadline, StorageOpts, NsId, TaskResult, Process, ProcessState) ->
@@ -101,7 +103,7 @@ complete_and_suspend(Pid, _Deadline, StorageOpts, NsId, TaskResult, Process, Pro
     storage_opts(),
     namespace_id(),
     task_result(),
-    process(),
+    process_updates(),
     process_state()
 ) -> {ok, [task()]} | no_return().
 complete_and_unlock(Pid, _Deadline, StorageOpts, NsId, TaskResult, Process, ProcessState) ->
@@ -116,7 +118,7 @@ complete_and_unlock(Pid, _Deadline, StorageOpts, NsId, TaskResult, Process, Proc
     prg_utils:with_observe(Fun, ?COMPLETION_KEY, [erlang:atom_to_list(NsId), "complete_and_unlock"]).
 
 -spec complete_and_error(
-    pid(), timestamp_ms(), storage_opts(), namespace_id(), task_result(), process()
+    pid(), timestamp_ms(), storage_opts(), namespace_id(), task_result(), process_updates()
 ) ->
     ok | no_return().
 complete_and_error(Pid, _Deadline, StorageOpts, NsId, TaskResult, Process) ->
@@ -128,7 +130,7 @@ complete_and_error(Pid, _Deadline, StorageOpts, NsId, TaskResult, Process) ->
             infinity
         )
     end,
-    prg_utils:with_observe(Fun, ?COMPLETION_KEY, [erlang:atom_to_list(NsId), "complete_and_unlock"]).
+    prg_utils:with_observe(Fun, ?COMPLETION_KEY, [erlang:atom_to_list(NsId), "complete_and_error"]).
 
 -spec remove_process(pid(), timestamp_ms(), storage_opts(), namespace_id(), id()) ->
     ok | no_return().
@@ -297,3 +299,7 @@ do_with_retry(Fun, Delay) ->
             timer:sleep(Delay),
             do_with_retry(Fun, Delay)
     end.
+
+add_handling_timeout(Timeout, #{processor := ProcessorConf} = NsOpts) ->
+    ProcessorOpts = maps:get(options, ProcessorConf, #{}),
+    NsOpts#{processor => ProcessorConf#{options => ProcessorOpts#{handling_timeout => Timeout}}}.

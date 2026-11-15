@@ -51,49 +51,68 @@ start_namespace(NsID, NsOpts) ->
 %% internal functions
 
 create_metrics() ->
-    _ = prometheus_histogram:new([
+    _ = prometheus_histogram:declare([
+        {name, progressor_get_duration_ms},
+        {help, "Process reading (get) durations in millisecond"},
+        {buckets, [50, 150, 300, 500, 750, 1000]},
+        {labels, [prg_namespace]}
+    ]),
+
+    _ = prometheus_counter:declare([
+        {name, progressor_cache_hit_counter},
+        {help, "Process reading (get) from cache"},
+        {labels, [prg_namespace]}
+    ]),
+
+    _ = prometheus_counter:declare([
+        {name, progressor_cache_miss_counter},
+        {help, "Process reading (get) bypassing cache"},
+        {labels, [prg_namespace]}
+    ]),
+
+    _ = prometheus_histogram:declare([
         {name, progressor_calls_scanning_duration_ms},
         {help, "Calls (call, repair) scanning durations in millisecond"},
         {buckets, [50, 150, 300, 500, 750, 1000]},
         {labels, [prg_namespace]}
     ]),
 
-    _ = prometheus_histogram:new([
+    _ = prometheus_histogram:declare([
         {name, progressor_timers_scanning_duration_ms},
         {help, "Timers (timeout, remove) scanning durations in millisecond"},
         {buckets, [50, 150, 300, 500, 750, 1000]},
         {labels, [prg_namespace]}
     ]),
 
-    _ = prometheus_histogram:new([
+    _ = prometheus_histogram:declare([
         {name, progressor_zombie_collection_duration_ms},
         {help, "Zombie tasks collecting durations in millisecond"},
         {buckets, [50, 150, 300, 500, 750, 1000]},
         {labels, [prg_namespace]}
     ]),
 
-    _ = prometheus_histogram:new([
+    _ = prometheus_histogram:declare([
         {name, progressor_request_preparing_duration_ms},
         {help, "Preparing request (init, call, repair) durations in millisecond"},
         {buckets, [50, 150, 300, 500, 750, 1000]},
         {labels, [prg_namespace, task_type]}
     ]),
 
-    _ = prometheus_histogram:new([
+    _ = prometheus_histogram:declare([
         {name, progressor_task_processing_duration_ms},
         {help, "Task processing durations in millisecond"},
         {buckets, [50, 150, 300, 500, 750, 1000]},
         {labels, [prg_namespace, task_type]}
     ]),
 
-    _ = prometheus_histogram:new([
+    _ = prometheus_histogram:declare([
         {name, progressor_task_completion_duration_ms},
         {help, "Task completion durations in millisecond"},
         {buckets, [50, 150, 300, 500, 750, 1000]},
         {labels, [prg_namespace, completion_type]}
     ]),
 
-    _ = prometheus_histogram:new([
+    _ = prometheus_histogram:declare([
         {name, progressor_process_removing_duration_ms},
         {help, "Task completion durations in millisecond"},
         {buckets, [50, 150, 300, 500, 750, 1000]},

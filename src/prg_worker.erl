@@ -16,10 +16,19 @@
 -export([handle_continue/2]).
 
 -export([process_task/3]).
--export([continuation_task/3]).
+-export([continuation_task/1]).
 -export([next_task/1]).
+-export([process_scheduled_task/3]).
 
--record(prg_worker_state, {ns_id, ns_opts, process, sidecar_pid}).
+-record(prg_worker_state, {ns_id, ns_opts, process, sidecar_pid, continuation}).
+
+%% 1 second
+-define(MIN_SCHEDULE_STEP_US, 1000000).
+%% 10 millisecond
+-define(SCHEDULE_DEFENSE_INTERVAL_US, 10000).
+-define(SCHEDULE_DEFENSE_INTERVAL_MS, ?SCHEDULE_DEFENSE_INTERVAL_US div 1000).
+%% Used to prevent timing errors caused by scheduler overhead
+-define(EFFECTIVE_SCHEDULE_STEP_US, ?MIN_SCHEDULE_STEP_US - ?SCHEDULE_DEFENSE_INTERVAL_US).
 
 %%%
 %%% API
@@ -29,13 +38,17 @@
 process_task(Worker, TaskHeader, #{process_id := _ProcessId, task_id := _TaskId} = Task) ->
     gen_server:cast(Worker, {process_task, TaskHeader, Task}).
 
--spec continuation_task(pid(), task_header(), task()) -> ok.
-continuation_task(Worker, TaskHeader, Task) ->
-    gen_server:cast(Worker, {continuation_task, TaskHeader, Task}).
+-spec continuation_task(pid()) -> ok.
+continuation_task(Worker) ->
+    gen_server:cast(Worker, {continuation_task}).
 
 -spec next_task(pid()) -> ok.
 next_task(Worker) ->
     gen_server:cast(Worker, next_task).
+
+-spec process_scheduled_task(pid(), id(), task_id()) -> ok.
+process_scheduled_task(Worker, ProcessId, TaskId) ->
+    gen_server:cast(Worker, {process_scheduled_task, ProcessId, TaskId}).
 
 %%%===================================================================
 %%% Spawning and gen_server implementation
@@ -45,6 +58,7 @@ start_link(NsId, NsOpts) ->
     gen_server:start_link(?MODULE, [NsId, NsOpts], []).
 
 init([NsId, NsOpts]) ->
+    process_flag(trap_exit, true),
     {ok,
         #prg_worker_state{
             ns_id = NsId,
@@ -80,37 +94,92 @@ handle_cast(
     NewState = do_process_task(TaskHeader, Task, Deadline, State#prg_worker_state{process = Process}),
     {noreply, NewState};
 handle_cast(
-    {continuation_task, TaskHeader, Task},
+    {continuation_task},
     #prg_worker_state{
         ns_id = NsId,
         ns_opts = #{storage := StorageOpts, process_step_timeout := TimeoutSec},
-        process = #{current_generation := CurrentGeneration} = CurrentProcess,
-        sidecar_pid = Pid
+        process = CurrentProcess,
+        sidecar_pid = Pid,
+        continuation = {TaskHeader, Task}
     } = State
 ) ->
     Deadline = erlang:system_time(millisecond) + TimeoutSec * 1000,
-    ProcessId = maps:get(process_id, Task),
-    GenerationFromTask = maps:get(generation, Task, CurrentGeneration),
+    Generation = maps:get(generation, Task, maps:get(current_generation, CurrentProcess)),
     Process =
-        case GenerationFromTask =:= CurrentGeneration of
-            true ->
+        case maps:get(state, CurrentProcess, undefined) of
+            #{generation := Generation} ->
                 CurrentProcess;
-            false ->
-                {ok, ProcessWithTargetState} =
-                    prg_worker_sidecar:get_process(Pid, Deadline, StorageOpts, NsId, ProcessId, GenerationFromTask),
-                ProcessWithTargetState
+            _ ->
+                {ok, Loaded} = prg_worker_sidecar:get_process(
+                    Pid,
+                    Deadline,
+                    StorageOpts,
+                    NsId,
+                    maps:get(process_id, Task),
+                    Generation
+                ),
+                Loaded
         end,
     NewState = do_process_task(TaskHeader, Task, Deadline, State#prg_worker_state{process = Process}),
     {noreply, NewState};
-handle_cast(next_task, #prg_worker_state{sidecar_pid = CurrentPid}) ->
+handle_cast(
+    {process_scheduled_task, ProcessId, TaskId},
+    #prg_worker_state{
+        ns_id = NsId,
+        ns_opts = #{storage := StorageOpts, process_step_timeout := TimeoutSec} = _NsOpts,
+        sidecar_pid = Pid
+    } = State
+) ->
+    try prg_storage:capture_task(StorageOpts, NsId, TaskId) of
+        [] ->
+            %% task cancelled, blocked, already running or finished
+            ok = next_task(self()),
+            {noreply, State};
+        [#{status := <<"running">>} = Task] ->
+            Deadline = erlang:system_time(millisecond) + TimeoutSec * 1000,
+            Generation = maps:get(generation, Task, latest),
+            {ok, Process} = prg_worker_sidecar:get_process(Pid, Deadline, StorageOpts, NsId, ProcessId, Generation),
+            TaskHeader = create_header(Task),
+            NewState = do_process_task(TaskHeader, Task, Deadline, State#prg_worker_state{process = Process}),
+            {noreply, NewState}
+    catch
+        Class:Term:Stacktrace ->
+            logger:error("process ~p. task capturing exception: ~p", [ProcessId, [Class, Term, Stacktrace]]),
+            ok = next_task(self()),
+            {noreply, State}
+    end;
+handle_cast(next_task, #prg_worker_state{sidecar_pid = CurrentPid} = State) ->
     %% kill sidecar and restart to clear memory
     true = erlang:unlink(CurrentPid),
     true = erlang:exit(CurrentPid, kill),
-    exit(normal).
+    {stop, normal, State#prg_worker_state{continuation = undefined}}.
 
+handle_info({'EXIT', Pid, Reason}, #prg_worker_state{sidecar_pid = Pid} = State) ->
+    {stop, Reason, State};
 handle_info(_Info, #prg_worker_state{} = State) ->
     {noreply, State}.
 
+terminate(_Reason, #prg_worker_state{continuation = {{TaskType, _}, Task}} = State) when
+    TaskType =:= timeout;
+    TaskType =:= remove
+->
+    #prg_worker_state{
+        ns_id = NsId,
+        ns_opts = #{storage := StorageOpts},
+        continuation = {_, #{task_id := TaskId}},
+        process = #{process_id := ProcessId}
+    } = State,
+    try prg_storage:reschedule_task(StorageOpts, NsId, Task) of
+        ok ->
+            logger:warning("process ~p reschedule task ~p when terminate", [ProcessId, TaskId])
+    catch
+        Class:Term:Trace ->
+            logger:error(
+                "process ~p reschedule task ~p error: ~p",
+                [ProcessId, TaskId, {Class, Term, Trace}]
+            )
+    end,
+    ok;
 terminate(_Reason, #prg_worker_state{} = _State) ->
     ok.
 
@@ -129,11 +198,10 @@ do_process_task(
     #prg_worker_state{
         ns_id = NsId,
         ns_opts = #{storage := StorageOpts},
-        process = #{process_id := ProcessId} = _Process,
+        process = #{process_id := ProcessId},
         sidecar_pid = Pid
     } = State
 ) ->
-    %% step hook
     ok = prg_worker_sidecar:remove_process(Pid, Deadline, StorageOpts, NsId, ProcessId),
     ok = next_task(self()),
     State#prg_worker_state{process = undefined};
@@ -152,136 +220,124 @@ do_process_task(
     Ctx = maps:get(context, Task, <<>>),
     Request = {extract_task_type(TaskHeader), Args, Process},
     Result = prg_worker_sidecar:process(Pid, Deadline, NsOpts, Request, Ctx),
-    handle_result(Result, TaskHeader, Task, Deadline, State).
+    case Result of
+        {ok, Intent} ->
+            handle_result_success(Intent, TaskHeader, Task, Deadline, State);
+        {error, _} ->
+            handle_result_error(Result, TaskHeader, Task, Deadline, State)
+    end.
 
-%% success result with timer
-handle_result(
-    {ok, #{action := #{set_timer := Timestamp} = Action, state := ProcessState0} = Result},
-    TaskHeader,
-    #{task_id := TaskId, context := Context},
-    Deadline,
+handle_result_success(Intent, TaskHeader, Task, Deadline, State) ->
+    Action = maps:get(action, Intent, idle),
+    dispatch_action(Action, Intent, TaskHeader, Task, Deadline, State).
+
+dispatch_action(idle, Intent, TaskHeader, Task, Deadline, State) ->
+    success_and_unlock(Intent, TaskHeader, Task, Deadline, State);
+dispatch_action(suspend, Intent, TaskHeader, Task, Deadline, State) ->
+    success_and_suspend(Intent, TaskHeader, Task, Deadline, State);
+dispatch_action(remove, Intent, TaskHeader, Task, Deadline, State) ->
+    success_and_remove(Intent, TaskHeader, Task, Deadline, State);
+dispatch_action(timeout, Intent, TaskHeader, Task, Deadline, State) ->
+    success_and_continue(
+        Intent, TaskHeader, Task, Deadline, State, timeout, erlang:system_time(microsecond)
+    );
+dispatch_action({schedule, #{at := Timestamp0, action := Action}}, Intent, TaskHeader, Task, Deadline, State) ->
+    success_and_continue(Intent, TaskHeader, Task, Deadline, State, Action, Timestamp0).
+
+handle_result_error(Result, {TaskType, _} = TaskHeader, Task, Deadline, State) when
+    TaskType =:= timeout;
+    TaskType =:= remove
+->
+    error_and_retry(Result, TaskHeader, Task, Deadline, State);
+handle_result_error(Result, {TaskType, _} = TaskHeader, Task, Deadline, State) when
+    TaskType =:= init;
+    TaskType =:= call;
+    TaskType =:= repair
+->
+    error_and_stop(Result, TaskHeader, Task, Deadline, State).
+
+success_and_continue(Intent, TaskHeader, Task, Deadline, State, Action, Timestamp0) ->
+    #{state := State0} = Intent,
+    #{context := Context} = Task,
     #prg_worker_state{
         ns_id = NsId,
         ns_opts = #{storage := StorageOpts},
         process = #{process_id := ProcessId} = Process,
         sidecar_pid = Pid
-    } = State
-) ->
-    %% this generation indicates the generation of state that was used in the task
-    %% may be older than current (last) generation
-    GenerationFromTask = state_generation(Process),
-    CurrentGeneration = prg_utils:define(current_generation(Process), 0),
-    NextGeneration = CurrentGeneration + 1,
-    ProcessState = ProcessState0#{generation => NextGeneration},
-    Now = erlang:system_time(second),
-    ProcessUpdated = update_process(
-        maps:without(
-            [detail, corrupted_by],
-            Process#{status => <<"running">>, current_generation => NextGeneration}
-        ),
-        Result
-    ),
-    Response = response(maps:get(response, Result, undefined)),
-    %% save generation on which task was executed
-    TaskResult = maybe_add_generation(
-        GenerationFromTask,
-        #{
-            task_id => TaskId,
-            response => term_to_binary(Response),
-            finished_time => Now,
-            status => <<"finished">>
-        }
-    ),
+    } = State,
+    Timestamp = prg_utils:to_microseconds(Timestamp0),
+    Now = erlang:system_time(microsecond),
+    {ProcessUpdated, Updates, NextState} = update_generation(Process, Intent, State0, Task),
+    Response = response(Intent),
+    TaskResult = task_result(Task, Process, <<"finished">>, Response),
     NewTask = #{
         process_id => ProcessId,
-        task_type => action_to_task_type(Action),
+        task_type => prg_utils:action_to_task_type(Action),
         status => create_status(Timestamp, Now),
         scheduled_time => Timestamp,
         context => Context,
         last_retry_interval => 0,
         attempts_count => 0
     },
-    %% step hook
     SaveResult = prg_worker_sidecar:complete_and_continue(
         Pid,
         Deadline,
         StorageOpts,
         NsId,
         TaskResult,
-        ProcessUpdated,
-        ProcessState,
+        Updates,
+        NextState,
         NewTask
     ),
     _ = maybe_reply(TaskHeader, Response),
     case SaveResult of
-        {ok, []} ->
+        {ok, [#{status := <<"waiting">>, task_id := NextTaskId, scheduled_time := Ts} | _]} ->
+            %% if status=waiting then expression (Ts - Now) div 1000
+            %% is guaranteed to return >= 1000 because see create_status/1
+            RunAfterMs = (Ts - Now) div 1000 - ?SCHEDULE_DEFENSE_INTERVAL_MS,
+            ok = prg_scheduler:schedule_task(NsId, ProcessId, NextTaskId, RunAfterMs),
             ok = next_task(self()),
             State#prg_worker_state{process = undefined};
         {ok, [ContinuationTask | _]} ->
-            ok = continuation_task(self(), create_header(ContinuationTask), ContinuationTask),
+            ok = continuation_task(self()),
             State#prg_worker_state{
-                process = ProcessUpdated#{state => ProcessState}
+                process = ProcessUpdated#{state => NextState},
+                continuation = {create_header(ContinuationTask), ContinuationTask}
             }
-    end;
-%% success result with undefined timer and remove action
-handle_result(
-    {ok, #{action := #{remove := true}} = Result},
-    TaskHeader,
-    _Task,
-    Deadline,
+    end.
+
+success_and_remove(Intent, TaskHeader, _Task, Deadline, State) ->
     #prg_worker_state{
         ns_id = NsId,
         ns_opts = #{storage := StorageOpts},
-        process = #{process_id := ProcessId} = _Process,
+        process = #{process_id := ProcessId},
         sidecar_pid = Pid
-    } = State
-) ->
-    Response = response(maps:get(response, Result, undefined)),
-    %% step hook
+    } = State,
+    Response = response(Intent),
     ok = prg_worker_sidecar:remove_process(Pid, Deadline, StorageOpts, NsId, ProcessId),
     _ = maybe_reply(TaskHeader, Response),
     ok = next_task(self()),
-    State#prg_worker_state{process = undefined};
-%% success result with unset_timer action
-handle_result(
-    {ok, #{state := ProcessState0, action := unset_timer} = Result},
-    TaskHeader,
-    #{task_id := TaskId} = _Task,
-    Deadline,
+    State#prg_worker_state{process = undefined}.
+
+success_and_suspend(Intent, TaskHeader, Task, Deadline, State) ->
+    #{state := State0} = Intent,
     #prg_worker_state{
         ns_id = NsId,
         ns_opts = #{storage := StorageOpts},
         process = Process,
         sidecar_pid = Pid
-    } = State
-) ->
-    GenerationFromTask = state_generation(Process),
-    CurrentGeneration = prg_utils:define(current_generation(Process), 0),
-    NextGeneration = CurrentGeneration + 1,
-    ProcessState = ProcessState0#{generation => NextGeneration},
-    %% step hook
-    ProcessUpdated = update_process(
-        maps:without([detail, corrupted_by], Process#{status => <<"running">>, current_generation => NextGeneration}),
-        Result
-    ),
-    Response = response(maps:get(response, Result, undefined)),
-    TaskResult = maybe_add_generation(
-        GenerationFromTask,
-        #{
-            task_id => TaskId,
-            response => term_to_binary(Response),
-            finished_time => erlang:system_time(second),
-            status => <<"finished">>
-        }
-    ),
+    } = State,
+    {ProcessUpdated, Updates, NextState} = update_generation(Process, Intent, State0, Task),
+    Response = response(Intent),
+    TaskResult = task_result(Task, Process, <<"finished">>, Response),
     SaveResult = prg_worker_sidecar:complete_and_suspend(
         Pid,
         Deadline,
         StorageOpts,
         NsId,
         TaskResult,
-        ProcessUpdated,
-        ProcessState
+        Updates,
+        NextState
     ),
     _ = maybe_reply(TaskHeader, Response),
     case SaveResult of
@@ -289,164 +345,224 @@ handle_result(
             ok = next_task(self()),
             State#prg_worker_state{process = undefined};
         {ok, [ContinuationTask | _]} ->
-            ok = continuation_task(self(), create_header(ContinuationTask), ContinuationTask),
+            ok = continuation_task(self()),
             State#prg_worker_state{
-                process = ProcessUpdated#{state => ProcessState}
+                process = ProcessUpdated#{state => NextState},
+                continuation = {create_header(ContinuationTask), ContinuationTask}
             }
-    end;
-%% success result with undefined action
-handle_result(
-    {ok, #{state := ProcessState0} = Result},
-    TaskHeader,
-    #{task_id := TaskId} = _Task,
-    Deadline,
+    end.
+
+success_and_unlock(Intent, TaskHeader, Task, Deadline, State) ->
+    #{state := State0} = Intent,
     #prg_worker_state{
         ns_id = NsId,
         ns_opts = #{storage := StorageOpts},
-        process = Process,
+        process = #{process_id := ProcessId} = Process,
         sidecar_pid = Pid
-    } = State
-) ->
-    GenerationFromTask = state_generation(Process),
-    CurrentGeneration = prg_utils:define(current_generation(Process), 0),
-    NextGeneration = CurrentGeneration + 1,
-    ProcessState = ProcessState0#{generation => NextGeneration},
-    %% step hook
-    ProcessUpdated = update_process(
-        maps:without([detail, corrupted_by], Process#{status => <<"running">>, current_generation => NextGeneration}),
-        Result
-    ),
-    Response = response(maps:get(response, Result, undefined)),
-    TaskResult = maybe_add_generation(
-        GenerationFromTask,
-        #{
-            task_id => TaskId,
-            response => term_to_binary(Response),
-            finished_time => erlang:system_time(second),
-            status => <<"finished">>
-        }
-    ),
+    } = State,
+    Now = erlang:system_time(microsecond),
+    {ProcessUpdated, Updates, NextState} = update_generation(Process, Intent, State0, Task),
+    Response = response(Intent),
+    TaskResult = task_result(Task, Process, <<"finished">>, Response),
     SaveResult = prg_worker_sidecar:complete_and_unlock(
         Pid,
         Deadline,
         StorageOpts,
         NsId,
         TaskResult,
-        ProcessUpdated,
-        ProcessState
+        Updates,
+        NextState
     ),
     _ = maybe_reply(TaskHeader, Response),
     case SaveResult of
         {ok, []} ->
             ok = next_task(self()),
             State#prg_worker_state{process = undefined};
-        {ok, [ContinuationTask | _]} ->
-            ok = continuation_task(self(), create_header(ContinuationTask), ContinuationTask),
+        {ok, [#{status := <<"waiting">>, task_id := NextTaskId, scheduled_time := Ts} | _]} ->
+            case (Ts - Now) div 1000 of
+                Timeout when Timeout =< ?SCHEDULE_DEFENSE_INTERVAL_MS ->
+                    process_scheduled_task(self(), ProcessId, NextTaskId),
+                    State#prg_worker_state{process = undefined};
+                Timeout when Timeout > ?SCHEDULE_DEFENSE_INTERVAL_MS ->
+                    RunAfterMs = Timeout - ?SCHEDULE_DEFENSE_INTERVAL_MS,
+                    ok = prg_scheduler:schedule_task(NsId, ProcessId, NextTaskId, RunAfterMs),
+                    ok = next_task(self()),
+                    State#prg_worker_state{process = undefined}
+            end;
+        {ok, [#{status := <<"running">>} = ContinuationTask | _]} ->
+            ok = continuation_task(self()),
             State#prg_worker_state{
-                process = ProcessUpdated#{state => ProcessState}
+                process = ProcessUpdated#{state => NextState},
+                continuation = {create_header(ContinuationTask), ContinuationTask}
             }
-    end;
-%% calls processing error
-handle_result(
-    {error, Reason} = Response,
+    end.
+
+error_and_stop({error, Reason} = Response, TaskHeader, Task, Deadline, State) ->
     {TaskType, _} = TaskHeader,
-    #{task_id := TaskId} = _Task,
-    Deadline,
     #prg_worker_state{
         ns_id = NsId,
         ns_opts = #{storage := StorageOpts},
-        process = Process,
+        process = #{process_id := ProcessId} = Process,
         sidecar_pid = Pid
-    } = State
-) when
-    TaskType =:= init;
-    TaskType =:= call;
-    TaskType =:= repair
-->
-    GenerationFromTask = state_generation(Process),
-    ProcessUpdated =
+    } = State,
+    {_ProcessUpdated, Updates} =
         case TaskType of
             repair ->
-                Process;
+                {Process, #{process_id => ProcessId}};
             _ ->
                 Detail = prg_utils:format(Reason),
-                %% step hook
-                Process#{status => <<"error">>, detail => Detail, corrupted_by => TaskId}
+                update_process(Process, {error, {Detail, undefined}})
         end,
-    TaskResult = maybe_add_generation(
-        GenerationFromTask,
-        #{
-            task_id => TaskId,
-            response => term_to_binary(Response),
-            finished_time => erlang:system_time(second),
-            status => <<"error">>
-        }
-    ),
+    TaskResult = task_result(Task, Process, <<"error">>, Response),
     ok = prg_worker_sidecar:complete_and_error(
-        Pid, Deadline, StorageOpts, NsId, TaskResult, ProcessUpdated
+        Pid, Deadline, StorageOpts, NsId, TaskResult, Updates
     ),
     _ = maybe_reply(TaskHeader, Response),
     ok = next_task(self()),
-    State#prg_worker_state{process = undefined};
-%% timeout/remove processing error
-handle_result(
-    {error, Reason} = Response,
-    {TaskType, _} = TaskHeader,
+    State#prg_worker_state{process = undefined}.
+
+error_and_retry({error, Reason} = Response, TaskHeader, Task, Deadline, State) ->
     #{task_id := TaskId} = Task,
-    Deadline,
     #prg_worker_state{
         ns_id = NsId,
         ns_opts = #{storage := StorageOpts, retry_policy := RetryPolicy},
-        process = Process,
+        process = #{process_id := ProcessId} = Process,
         sidecar_pid = Pid
-    } = State
-) when TaskType =:= timeout; TaskType =:= remove ->
-    GenerationFromTask = state_generation(Process),
-    TaskResult = maybe_add_generation(
-        GenerationFromTask,
-        #{
-            task_id => TaskId,
-            response => term_to_binary(Response),
-            finished_time => erlang:system_time(second),
-            status => <<"error">>
-        }
-    ),
+    } = State,
+    TaskResult = task_result(Task, Process, <<"error">>, Response),
     _ =
         case check_retryable(TaskHeader, Task, RetryPolicy, Reason) of
             not_retryable ->
                 Detail = prg_utils:format(Reason),
-                ProcessUpdated = Process#{
-                    status => <<"error">>, detail => Detail, corrupted_by => TaskId
-                },
-                %% step hook
+                {_ProcessUpdated, Updates} = update_process(Process, {error, {Detail, TaskId}}),
                 ok = prg_worker_sidecar:complete_and_error(
-                    Pid, Deadline, StorageOpts, NsId, TaskResult, ProcessUpdated
+                    Pid, Deadline, StorageOpts, NsId, TaskResult, Updates
                 );
             NewTask ->
-                {ok, _} = prg_worker_sidecar:complete_and_continue(
+                Updates = #{process_id => ProcessId},
+                %% prg_storage guarantees that when saving a task with the error status,
+                %% all deferred tasks of all types will be completed with the canceled status,
+                %% so calling complete_and_continue is guaranteed to return the retrieval task,
+                %% and not any other deferred task
+                {ok, [
+                    #{
+                        status := <<"waiting">>,
+                        task_id := NextTaskId,
+                        scheduled_time := Ts
+                    }
+                ]} = prg_worker_sidecar:complete_and_continue(
                     Pid,
                     Deadline,
                     StorageOpts,
                     NsId,
                     TaskResult,
-                    Process,
+                    Updates,
                     undefined,
                     NewTask
-                )
+                ),
+                Now = erlang:system_time(microsecond),
+                %% The retry policy only supports a second time scale
+                %% this ensures that the result of the expression (Ts - Now) div 1000
+                %% will be greater or approximately equal 1000
+                RunAfterMs = (Ts - Now) div 1000 - ?SCHEDULE_DEFENSE_INTERVAL_MS,
+                ok = prg_scheduler:schedule_task(NsId, ProcessId, NextTaskId, RunAfterMs)
         end,
     ok = next_task(self()),
     State#prg_worker_state{process = undefined}.
 
-update_process(Process, Result) ->
+update_process(#{status := <<"error">>, process_id := ProcessId} = Process, {error, _}) ->
+    %% process error when already broken
+    {Process, #{process_id => ProcessId}};
+update_process(#{status := Status, process_id := ProcessId} = Process, {error, {Detail, Cause}}) when
+    Status =:= <<"running">>;
+    Status =:= <<"init">>
+->
+    %% process broken (transition from running/init to error)
+    StatusChangedAt = erlang:system_time(microsecond),
+    ProcessUpdates = #{
+        process_id => ProcessId,
+        status => <<"error">>,
+        previous_status => Status,
+        status_changed_at => StatusChangedAt,
+        detail => Detail
+    },
+    case Cause of
+        undefined ->
+            {maps:merge(Process, ProcessUpdates), ProcessUpdates};
+        TaskId ->
+            Updates = ProcessUpdates#{corrupted_by => TaskId},
+            {maps:merge(Process, Updates), Updates}
+    end;
+update_process(#{status := <<"error">>, process_id := ProcessId} = Process, Intent) ->
+    %% process repaired (transition from error to running)
+    StatusChangedAt = erlang:system_time(microsecond),
+    NewProcess = maps:without(
+        [detail, corrupted_by],
+        Process#{status => <<"running">>, previous_status := <<"error">>, status_changed_at => StatusChangedAt}
+    ),
+    ProcessUpdates = #{
+        process_id => ProcessId,
+        status => <<"running">>,
+        previous_status => <<"error">>,
+        status_changed_at => StatusChangedAt,
+        detail => undefined,
+        corrupted_by => undefined
+    },
+    update_process_from_intent(NewProcess, ProcessUpdates, Intent);
+update_process(#{status := <<"init">>, process_id := ProcessId} = Process, Intent) ->
+    %% transition from init to running
+    StatusChangedAt = erlang:system_time(microsecond),
+    ProcessUpdates = #{
+        process_id => ProcessId,
+        status => <<"running">>,
+        previous_status => <<"init">>,
+        status_changed_at => StatusChangedAt
+    },
+    NewProcess = maps:merge(Process, ProcessUpdates),
+    update_process_from_intent(NewProcess, ProcessUpdates, Intent);
+update_process(#{previous_status := <<"init">>, status := <<"running">>, process_id := ProcessId} = Process, Intent) ->
+    %% first transition from running to running, need to update previous_status
+    ProcessUpdates = #{
+        process_id => ProcessId,
+        status => <<"running">>,
+        previous_status => <<"running">>
+    },
+    NewProcess = maps:merge(Process, ProcessUpdates),
+    update_process_from_intent(NewProcess, ProcessUpdates, Intent);
+update_process(#{status := <<"running">>, process_id := ProcessId} = Process, Intent) ->
+    %% normal work
+    update_process_from_intent(Process, #{process_id => ProcessId}, Intent).
+
+update_process_from_intent(Process, ProcessUpdates, Intent) ->
     maps:fold(
         fun
-            (metadata, Meta, Acc) -> Acc#{metadata => Meta};
-            (aux_state, AuxState, Acc) -> Acc#{aux_state => AuxState};
-            (_, _, Acc) -> Acc
+            (metadata, Meta, {#{metadata := OldMeta} = Proc, Updates}) when Meta =/= OldMeta ->
+                {Proc#{metadata => Meta}, Updates#{metadata => Meta}};
+            (aux_state, AuxState, {#{aux_state := OldAuxState} = Proc, Updates}) when AuxState =/= OldAuxState ->
+                {Proc#{aux_state => AuxState}, Updates#{aux_state => AuxState}};
+            (metadata, Meta, {Proc, Updates}) ->
+                {Proc#{metadata => Meta}, Updates#{metadata => Meta}};
+            (aux_state, AuxState, {Proc, Updates}) ->
+                {Proc#{aux_state => AuxState}, Updates#{aux_state => AuxState}};
+            (_K, _V, Acc) ->
+                Acc
         end,
-        Process,
-        Result
+        {Process, ProcessUpdates},
+        Intent
     ).
+
+task_result(#{task_id := TaskId, running_time := RunningTime}, Process, Status, Response) ->
+    Result = #{
+        task_id => TaskId,
+        response => term_to_binary(Response),
+        running_time => RunningTime,
+        finished_time => erlang:system_time(microsecond),
+        status => Status
+    },
+    case maps:get(state, Process, undefined) of
+        #{generation := Generation} -> Result#{generation => Generation};
+        _ -> Result
+    end.
 
 -spec maybe_reply(task_header(), term()) -> term().
 maybe_reply({_, undefined}, _) ->
@@ -454,25 +570,29 @@ maybe_reply({_, undefined}, _) ->
 maybe_reply({_, {Receiver, Ref}}, Response) ->
     progressor:reply(Receiver, {Ref, Response}).
 
-response({error, _} = Error) ->
+response(#{response := {error, _} = Error}) ->
     Error;
-response(undefined) ->
-    {ok, ok};
-response(Data) ->
-    {ok, Data}.
+response(#{response := Data}) ->
+    {ok, Data};
+response(Intent) when not is_map_key(response, Intent) ->
+    {ok, ok}.
 
 extract_task_type({TaskType, _}) ->
     TaskType.
 
 check_retryable(TaskHeader, #{last_retry_interval := LastInterval} = Task, RetryPolicy, Error) ->
-    Now = erlang:system_time(second),
-    Timeout =
+    Now = erlang:system_time(microsecond),
+    ProcessId = maps:get(process_id, Task),
+    TimeoutSec =
         case LastInterval =:= 0 of
             true -> maps:get(initial_timeout, RetryPolicy);
             false -> trunc(LastInterval * maps:get(backoff_coefficient, RetryPolicy))
         end,
     Attempts = maps:get(attempts_count, Task) + 1,
-    case is_retryable(Error, TaskHeader, RetryPolicy, Timeout, Attempts) of
+    logger:info("check retryable ~p for error: ~p, last retry interval: ~p sec, attempt: ~p", [
+        ProcessId, Error, LastInterval, Attempts
+    ]),
+    case is_retryable(Error, TaskHeader, RetryPolicy, TimeoutSec, Attempts) of
         true ->
             maps:with(
                 [
@@ -483,12 +603,13 @@ check_retryable(TaskHeader, #{last_retry_interval := LastInterval} = Task, Retry
                     args,
                     last_retry_interval,
                     attempts_count,
-                    metadata
+                    metadata,
+                    context
                 ],
                 Task#{
                     status => <<"waiting">>,
-                    scheduled_time => Now + Timeout,
-                    last_retry_interval => Timeout,
+                    scheduled_time => Now + (TimeoutSec * 1000000),
+                    last_retry_interval => TimeoutSec,
                     attempts_count => Attempts
                 }
             );
@@ -507,13 +628,20 @@ is_retryable({exception, _, _}, _TaskHeader, _RetryPolicy, _Timeout, _Attempts) 
 is_retryable(Error, {timeout, undefined}, RetryPolicy, Timeout, Attempts) ->
     ?TEST_POLICY(Error, RetryPolicy, Timeout, Attempts);
 is_retryable(_Error, _TaskHeader, _RetryPolicy, _Timeout, _Attempts) ->
-    %% only timeout/remove task can be retryable
     false.
 
+%% Sub-second schedules are coerced to immediate execution: if the gap to
+%% `scheduled_time` is below ~1s (scheduler overhead), the task stays `running`
+%% instead of `waiting`.
 create_status(Timestamp, Now) when Timestamp =< Now ->
     <<"running">>;
-create_status(_Timestamp, _Now) ->
-    <<"waiting">>.
+create_status(Timestamp, Now) ->
+    case (Timestamp - Now) >= ?EFFECTIVE_SCHEDULE_STEP_US of
+        true ->
+            <<"waiting">>;
+        false ->
+            <<"running">>
+    end.
 
 create_header(#{task_type := <<"timeout">>}) ->
     {timeout, undefined};
@@ -527,23 +655,9 @@ create_header(#{task_type := <<"repair">>}) ->
     {repair, undefined};
 create_header(#{task_type := <<"notify">>}) ->
     {notify, undefined}.
-%%
-action_to_task_type(#{remove := true}) ->
-    <<"remove">>;
-action_to_task_type(#{set_timer := _}) ->
-    <<"timeout">>.
 
-state_generation(#{state := #{generation := Generation}}) ->
-    Generation;
-state_generation(_) ->
-    undefined.
-
-current_generation(#{current_generation := CurrentGeneration}) ->
-    CurrentGeneration;
-current_generation(_) ->
-    undefined.
-
-maybe_add_generation(undefined, TaskResult) ->
-    TaskResult;
-maybe_add_generation(Gen, TaskResult) ->
-    TaskResult#{generation => Gen}.
+update_generation(Process, Intent, State0, #{task_id := TaskId}) ->
+    Generation = maps:get(current_generation, Process, 0) + 1,
+    NextState = State0#{generation => Generation, process_id => maps:get(process_id, Process), task_id => TaskId},
+    {Updated, Updates} = update_process(Process, Intent),
+    {Updated#{current_generation => Generation}, Updates#{current_generation => Generation}, NextState}.

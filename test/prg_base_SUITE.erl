@@ -15,6 +15,8 @@
 %% Tests
 -export([simple_timers_test/1]).
 -export([simple_call_test/1]).
+-export([reschedule_after_call_test/1]).
+-export([simple_repair_after_call_error_test/1]).
 -export([simple_call_with_generation_test/1]).
 -export([call_replace_timer_test/1]).
 -export([call_unset_timer_test/1]).
@@ -27,6 +29,9 @@
 -export([repair_after_call_error_test/1]).
 -export([remove_by_timer_test/1]).
 -export([remove_without_timer_test/1]).
+
+-define(TIMEOUT_IN(Sec), {schedule, #{at => erlang:system_time(microsecond) + (Sec) * 1000000, action => timeout}}).
+-define(REMOVE_IN(Sec), {schedule, #{at => erlang:system_time(microsecond) + (Sec) * 1000000, action => remove}}).
 
 -define(NS(C), proplists:get_value(ns_id, C, 'default/default')).
 -define(AWAIT_TIMEOUT(C), proplists:get_value(repl_timeout, C, 0)).
@@ -51,16 +56,36 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_group(cache, C) ->
+    _ = prg_ct_hook:start_applications(),
     [{ns_id, 'cached/namespace'}, {repl_timeout, 50} | C];
+init_per_group(tasks_injection, C) ->
+    PrgConfig = prg_ct_hook:app_env(progressor),
+    UpdPrgConfig = lists:foldl(
+        fun
+            ({defaults, Defaults}, Acc) -> [{defaults, Defaults#{task_scan_timeout => 1}} | Acc];
+            (Env, Acc) -> [Env | Acc]
+        end,
+        [],
+        PrgConfig
+    ),
+    Applications = [
+        {epg_connector, prg_ct_hook:app_env(epg_connector)},
+        {progressor, UpdPrgConfig}
+    ],
+    _ = prg_ct_hook:start_applications(Applications),
+    C;
 init_per_group(_, C) ->
+    _ = prg_ct_hook:start_applications(),
     C.
 
 end_per_group(_, _) ->
+    _ = prg_ct_hook:stop_applications(),
     ok.
 
 all() ->
     [
         {group, base},
+        {group, tasks_injection},
         {group, cache}
     ].
 
@@ -69,19 +94,20 @@ groups() ->
         {base, [], [
             simple_timers_test,
             simple_call_test,
+            reschedule_after_call_test,
             simple_call_with_generation_test,
             call_replace_timer_test,
             call_unset_timer_test,
             postponed_call_test,
             postponed_call_to_suspended_process_test,
             multiple_calls_test,
-            simple_repair_after_non_retriable_error_test,
             repair_after_non_retriable_error_test,
             error_after_max_retries_test,
             repair_after_call_error_test,
             remove_by_timer_test,
             remove_without_timer_test
         ]},
+        {tasks_injection, [], [simple_repair_after_non_retriable_error_test, simple_repair_after_call_error_test]},
         {cache, [], [
             {group, base}
         ]}
@@ -164,6 +190,56 @@ call_replace_timer_test(C) ->
     %% wait task_scan_timeout, maybe remove works
     timer:sleep(4000),
     {ok, ?PROCESS_EXPECTED(Id, 3, 3, <<"running">>)} = progressor:get(#{ns => ?NS(C), id => Id}),
+    {ok, [
+        #{
+            args := <<"init_args">>,
+            running := _,
+            finished := _,
+            state_generation := 1,
+            state_timestamp := _,
+            state_metadata := #{<<"format_version">> := 1},
+            state_payload := _,
+            task_id := _,
+            task_type := <<"init">>,
+            task_status := <<"finished">>,
+            scheduled := _,
+            retry_interval := 0,
+            retry_attempts := 0
+        },
+        #{
+            args := <<"call_args">>,
+            running := _,
+            finished := _,
+            generation := 1,
+            state_generation := 2,
+            task_id := _,
+            task_type := <<"call">>,
+            task_status := <<"finished">>,
+            scheduled := _,
+            retry_interval := 0,
+            retry_attempts := 0
+        },
+        #{
+            running := _,
+            finished := _,
+            generation := 2,
+            state_generation := 3,
+            task_id := _,
+            task_type := <<"timeout">>,
+            task_status := <<"finished">>,
+            scheduled := _,
+            retry_interval := 0,
+            retry_attempts := 0
+        },
+        #{
+            task_id := _,
+            task_type := <<"remove">>,
+            task_status := <<"cancelled">>,
+            scheduled := _,
+            retry_interval := 0,
+            retry_attempts := 0
+        }
+    ]} = progressor:trace(#{ns => ?NS(C), id => Id}),
     unmock_processor(),
     ok.
 %%
@@ -337,8 +413,7 @@ repair_after_call_error_test(C) ->
         state := #{generation := 1},
         process_id := Id,
         current_generation := 1,
-        detail := <<"retry_this">>,
-        corrupted_by := CorruptionTask
+        detail := <<"retry_this">>
     }} = progressor:get(#{ns => ?NS(C), id => Id}),
     {error, <<"repair_error">>} = progressor:repair(#{
         ns => ?NS(C), id => Id, args => <<"bad_repair_args">>
@@ -351,8 +426,7 @@ repair_after_call_error_test(C) ->
         state := #{generation := 1},
         process_id := Id,
         current_generation := 1,
-        detail := <<"retry_this">>,
-        corrupted_by := CorruptionTask
+        detail := <<"retry_this">>
     }} = progressor:get(#{ns => ?NS(C), id => Id}),
     {ok, ok} = progressor:repair(#{ns => ?NS(C), id => Id, args => <<"repair_args">>}),
     4 = expect_steps_counter(4),
@@ -395,10 +469,106 @@ remove_without_timer_test(C) ->
     unmock_processor(),
     ok.
 
+-spec reschedule_after_call_test(_) -> _.
+reschedule_after_call_test(C) ->
+    %% steps:
+    %% 1. init ->    [event1], timer 2s
+    %% 2. call ->    [event2], undefined (duration 500 ms)
+    %% 3. timeout -> [event3], undefined
+    _ = mock_processor(reschedule_after_call_test),
+    Id = gen_id(),
+    {ok, ok} = progressor:init(#{ns => ?NS(C), id => Id, args => <<"init_args">>}),
+    {ok, <<"response">>} = progressor:call(#{ns => ?NS(C), id => Id, args => <<"call_args">>}),
+    3 = expect_steps_counter(3),
+    timer:sleep(?AWAIT_TIMEOUT(C)),
+    {ok, ?PROCESS_EXPECTED(Id, 3, 3, <<"running">>)} = progressor:get(#{ns => ?NS(C), id => Id}),
+    unmock_processor(),
+    ok.
+%%
+
+-spec simple_repair_after_call_error_test(_) -> _.
+simple_repair_after_call_error_test(C) ->
+    %% steps:
+    %% 1. init ->    [],       undefined
+    %% 2. call ->    {error, retry_this}
+    %% 3. simple_repair
+    _ = mock_processor(simple_repair_after_call_error_test),
+    Id = gen_id(),
+    {ok, ok} = progressor:init(#{ns => ?NS(C), id => Id, args => <<"init_args">>}),
+    {error, retry_this} = progressor:call(#{ns => ?NS(C), id => Id, args => <<"call_args">>}),
+    2 = expect_steps_counter(2),
+    timer:sleep(?AWAIT_TIMEOUT(C)),
+    {ok, #{
+        detail := <<"retry_this">>,
+        metadata := #{<<"k">> := <<"v">>},
+        state := #{generation := 1},
+        process_id := Id,
+        status := <<"error">>,
+        previous_status := <<"running">>
+    }} = progressor:get(#{ns => ?NS(C), id => Id}),
+    {ok, ok} = progressor:simple_repair(#{ns => ?NS(C), id => Id}),
+    timer:sleep(?AWAIT_TIMEOUT(C)),
+    {ok, #{
+        metadata := #{<<"k">> := <<"v">>},
+        state := #{generation := 1},
+        process_id := Id,
+        status := <<"running">>,
+        previous_status := <<"error">>
+    }} = progressor:get(#{ns => ?NS(C), id => Id}),
+    unmock_processor(),
+    ok.
+
 %%%%%%%%%%%%%%%%%%%%%
 %% Internal functions
 %%%%%%%%%%%%%%%%%%%%%
 
+mock_processor(reschedule_after_call_test = TestCase) ->
+    Self = self(),
+    MockProcessor = fun
+        ({init, <<"init_args">>, _Process}, _Opts, _Ctx) ->
+            Result = #{
+                state => state(),
+                action => ?TIMEOUT_IN(2)
+            },
+            Self ! 1,
+            {ok, Result};
+        ({call, <<"call_args">>, _Process}, _Opts, _Ctx) ->
+            %% call when process scheduled (wait timeout)
+            timer:sleep(500),
+            Result = #{
+                response => <<"response">>,
+                state => state()
+            },
+            Self ! 2,
+            {ok, Result};
+        ({timeout, <<>>, #{state := #{generation := Generation}} = _Process}, _Opts, _Ctx) ->
+            %% timeout after call processing (without scanner, performed by internal timer)
+            ?assertEqual(2, Generation),
+            Result = #{
+                state => state()
+            },
+            Self ! 3,
+            {ok, Result}
+    end,
+    mock_processor(TestCase, MockProcessor);
+%%
+mock_processor(simple_repair_after_call_error_test = TestCase) ->
+    Self = self(),
+    MockProcessor = fun
+        ({init, <<"init_args">>, _Process}, _Opts, _Ctx) ->
+            Result = #{
+                metadata => #{<<"k">> => <<"v">>},
+                state => state()
+            },
+            Self ! 1,
+            {ok, Result};
+        ({call, <<"call_args">>, #{state := #{generation := 1}} = _Process}, _Opts, _Ctx) ->
+            Self ! 2,
+            %% retriable error for call must be ignore and process set error status
+            {error, retry_this}
+    end,
+    mock_processor(TestCase, MockProcessor);
+%%
 mock_processor(simple_timers_test = TestCase) ->
     Self = self(),
     MockProcessor = fun({_Type, _Args, Process}, _Opts, _Ctx) ->
@@ -413,7 +583,7 @@ mock_processor(simple_timers_test = TestCase) ->
                 Result = #{
                     state => state(),
                     %% continuation timer
-                    action => #{set_timer => erlang:system_time(second)},
+                    action => timeout,
                     aux_state => erlang:term_to_binary(<<"aux_state2">>)
                 },
                 Self ! 2,
@@ -423,7 +593,7 @@ mock_processor(simple_timers_test = TestCase) ->
                     state => state(),
                     metadata => #{<<"k">> => <<"v">>},
                     %% postponed timer
-                    action => #{set_timer => erlang:system_time(second) + 2},
+                    action => ?TIMEOUT_IN(2),
                     aux_state => erlang:term_to_binary(<<"aux_state1">>)
                 },
                 Self ! 1,
@@ -438,7 +608,7 @@ mock_processor(simple_call_test = TestCase) ->
         ({init, <<"init_args">>, _Process}, _Opts, _Ctx) ->
             Result = #{
                 state => state(),
-                action => #{set_timer => erlang:system_time(second) + 2}
+                action => ?TIMEOUT_IN(2)
             },
             Self ! 1,
             {ok, Result};
@@ -491,7 +661,7 @@ mock_processor(simple_call_with_generation_test = TestCase) ->
             Result = #{
                 response => <<"response">>,
                 state => state(),
-                action => #{set_timer => erlang:system_time(second)}
+                action => timeout
             },
             Self ! 3,
             {ok, Result};
@@ -511,7 +681,7 @@ mock_processor(call_replace_timer_test = TestCase) ->
         ({init, <<"init_args">>, _Process}, _Opts, _Ctx) ->
             Result = #{
                 state => state(),
-                action => #{set_timer => erlang:system_time(second) + 2, remove => true}
+                action => ?REMOVE_IN(2)
             },
             Self ! 1,
             {ok, Result};
@@ -520,7 +690,7 @@ mock_processor(call_replace_timer_test = TestCase) ->
             Result = #{
                 response => <<"response">>,
                 state => state(),
-                action => #{set_timer => erlang:system_time(second)}
+                action => timeout
             },
             Self ! 2,
             {ok, Result};
@@ -540,7 +710,7 @@ mock_processor(call_unset_timer_test = TestCase) ->
         ({init, <<"init_args">>, _Process}, _Opts, _Ctx) ->
             Result = #{
                 state => state(),
-                action => #{set_timer => erlang:system_time(second) + 2}
+                action => ?TIMEOUT_IN(2)
             },
             Self ! 1,
             {ok, Result};
@@ -549,7 +719,7 @@ mock_processor(call_unset_timer_test = TestCase) ->
             Result = #{
                 response => <<"response">>,
                 state => state(),
-                action => unset_timer
+                action => suspend
             },
             Self ! 2,
             {ok, Result};
@@ -568,7 +738,7 @@ mock_processor(postponed_call_test = TestCase) ->
         ({init, <<"init_args">>, _Process}, _Opts, _Ctx) ->
             Result = #{
                 state => state(),
-                action => #{set_timer => erlang:system_time(second)}
+                action => timeout
             },
             Self ! 1,
             {ok, Result};
@@ -576,7 +746,7 @@ mock_processor(postponed_call_test = TestCase) ->
             timer:sleep(3000),
             Result = #{
                 state => state(),
-                action => #{set_timer => erlang:system_time(second)}
+                action => timeout
             },
             Self ! 2,
             {ok, Result};
@@ -602,7 +772,7 @@ mock_processor(postponed_call_to_suspended_process_test = TestCase) ->
         ({init, <<"init_args">>, _Process}, _Opts, _Ctx) ->
             Result = #{
                 state => state(),
-                action => #{set_timer => erlang:system_time(second)}
+                action => timeout
             },
             Self ! 1,
             {ok, Result};
@@ -649,7 +819,7 @@ mock_processor(simple_repair_after_non_retriable_error_test = TestCase) ->
         ({init, <<"init_args">>, _Process}, _Opts, _Ctx) ->
             Result = #{
                 state => state(),
-                action => #{set_timer => erlang:system_time(second)}
+                action => timeout
             },
             Self ! 1,
             {ok, Result};
@@ -660,7 +830,7 @@ mock_processor(simple_repair_after_non_retriable_error_test = TestCase) ->
             %% timeout via simple repair
             Result = #{
                 state => state(),
-                action => #{set_timer => erlang:system_time(second)}
+                action => timeout
             },
             Self ! 3,
             {ok, Result};
@@ -679,7 +849,7 @@ mock_processor(repair_after_non_retriable_error_test = TestCase) ->
         ({init, <<"init_args">>, _Process}, _Opts, _Ctx) ->
             Result = #{
                 state => state(),
-                action => #{set_timer => erlang:system_time(second)}
+                action => timeout
             },
             Self ! 1,
             {ok, Result};
@@ -701,7 +871,7 @@ mock_processor(error_after_max_retries_test = TestCase) ->
         ({init, <<"init_args">>, _Process}, _Opts, _Ctx) ->
             Result = #{
                 state => state(),
-                action => #{set_timer => erlang:system_time(second)}
+                action => timeout
             },
             Self ! 1,
             {ok, Result};
@@ -744,7 +914,7 @@ mock_processor(remove_by_timer_test = TestCase) ->
     MockProcessor = fun({init, <<"init_args">>, _Process}, _Opts, _Ctx) ->
         Result = #{
             state => state(),
-            action => #{set_timer => erlang:system_time(second) + 2, remove => true}
+            action => ?REMOVE_IN(2)
         },
         {ok, Result}
     end,
@@ -756,14 +926,14 @@ mock_processor(remove_without_timer_test = TestCase) ->
         ({init, <<"init_args">>, _Process}, _Opts, _Ctx) ->
             Result = #{
                 state => state(),
-                action => #{set_timer => erlang:system_time(second) + 2}
+                action => ?TIMEOUT_IN(2)
             },
             Self ! 1,
             {ok, Result};
         ({timeout, <<>>, _Process}, _Opts, _Ctx) ->
             Result = #{
                 state => state(),
-                action => #{remove => true}
+                action => remove
             },
             Self ! 2,
             {ok, Result}
@@ -801,7 +971,7 @@ expect_steps_counter(ExpectedSteps, CurrentStep) ->
 
 state() ->
     #{
-        timestamp => erlang:system_time(second),
+        timestamp => erlang:system_time(microsecond),
         metadata => #{<<"format_version">> => 1},
         payload => erlang:term_to_binary({bin, crypto:strong_rand_bytes(8)})
     }.

@@ -2,6 +2,14 @@
 
 -include("progressor.hrl").
 
+-export([process_trace/3]).
+
+-export([repair_process/3]).
+
+-export([capture_task/3]).
+
+-export([reschedule_task/3]).
+
 %% api handler functions
 -export([health_check/1]).
 -export([get_task_result/3]).
@@ -56,7 +64,7 @@ get_process_status(#{client := Handler, options := HandlerOpts}, NsId, Id) ->
 -spec prepare_init(storage_opts(), namespace_id(), id(), task()) ->
     {ok, {postpone, task_id()} | {continue, task_id()}} | {error, _Reason}.
 prepare_init(#{client := Handler, options := HandlerOpts}, NsId, ProcessId, InitTask) ->
-    Handler:prepare_init(HandlerOpts, NsId, ?NEW_PROCESS(ProcessId), InitTask).
+    Handler:prepare_init(HandlerOpts, NsId, ProcessId, InitTask).
 
 -spec prepare_call(storage_opts(), namespace_id(), id(), task()) ->
     {ok, {postpone, task_id()} | {continue, task_id()}} | {error, _Error}.
@@ -90,7 +98,7 @@ collect_zombies(#{client := Handler, options := HandlerOpts}, NsId, Timeout) ->
 %%%%%%%%%%%%%%%%%%%
 
 -spec complete_and_continue(
-    storage_opts(), namespace_id(), task_result(), process(), process_state(), task()
+    storage_opts(), namespace_id(), task_result(), process_updates(), process_state(), task()
 ) ->
     {ok, [task()]}.
 complete_and_continue(
@@ -98,18 +106,18 @@ complete_and_continue(
 ) ->
     Handler:complete_and_continue(HandlerOpts, NsId, TaskResult, Process, ProcessState, NextTask).
 
--spec complete_and_suspend(storage_opts(), namespace_id(), task_result(), process(), process_state()) ->
+-spec complete_and_suspend(storage_opts(), namespace_id(), task_result(), process_updates(), process_state()) ->
     {ok, [task()]}.
 complete_and_suspend(
     #{client := Handler, options := HandlerOpts}, NsId, TaskResult, Process, ProcessState
 ) ->
     Handler:complete_and_suspend(HandlerOpts, NsId, TaskResult, Process, ProcessState).
 
--spec complete_and_error(storage_opts(), namespace_id(), task_result(), process()) -> ok.
+-spec complete_and_error(storage_opts(), namespace_id(), task_result(), process_updates()) -> ok.
 complete_and_error(#{client := Handler, options := HandlerOpts}, NsId, TaskResult, Process) ->
     Handler:complete_and_error(HandlerOpts, NsId, TaskResult, Process).
 
--spec complete_and_unlock(storage_opts(), namespace_id(), task_result(), process(), process_state()) ->
+-spec complete_and_unlock(storage_opts(), namespace_id(), task_result(), process_updates(), process_state()) ->
     {ok, [task()]}.
 complete_and_unlock(
     #{client := Handler, options := HandlerOpts}, NsId, TaskResult, Process, ProcessState
@@ -162,3 +170,23 @@ db_init(#{client := Handler, options := HandlerOpts}, NsId) ->
 -spec cleanup(_, _) -> _.
 cleanup(#{client := Handler, options := HandlerOpts}, NsId) ->
     Handler:cleanup(HandlerOpts, NsId).
+
+-spec process_trace(storage_opts(), namespace_id(), id()) -> {ok, _Result} | {error, _Reason}.
+process_trace(#{client := Handler, options := HandlerOpts}, NsId, Id) ->
+    Handler:process_trace(HandlerOpts, NsId, Id).
+
+-spec repair_process(storage_opts(), namespace_id(), id()) -> ok | no_return().
+repair_process(#{client := Handler, options := HandlerOpts}, NsId, ProcessId) ->
+    Handler:repair_process(HandlerOpts, NsId, ProcessId).
+
+-spec capture_task(storage_opts(), namespace_id(), task_id()) -> [task()].
+capture_task(#{client := Handler, options := HandlerOpts}, NsId, TaskId) ->
+    Handler:capture_task(HandlerOpts, NsId, TaskId).
+
+-spec reschedule_task(storage_opts(), namespace_id(), task()) -> ok | no_return().
+reschedule_task(#{client := Handler, options := HandlerOpts}, NsId, Task) ->
+    Handler:reschedule_task(HandlerOpts, NsId, Task).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% Shared functions (recipient required)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
