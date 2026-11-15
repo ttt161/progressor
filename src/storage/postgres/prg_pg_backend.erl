@@ -509,7 +509,9 @@ prepare_repair(PgOpts, NsId, _ProcessId, #{status := <<"running">>} = Task) ->
         end
     ).
 
--spec complete_and_continue(pg_opts(), namespace_id(), task_result(), process_updates(), process_state(), task()) ->
+-spec complete_and_continue(
+    pg_opts(), namespace_id(), task_result(), process_updates(), optional_process_state(), task()
+) ->
     {ok, [task()]}.
 complete_and_continue(PgOpts, NsId, TaskResult, ProcessUpdates, NextState, NextTask) ->
     % update completed task and process,

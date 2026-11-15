@@ -98,7 +98,7 @@ collect_zombies(#{client := Handler, options := HandlerOpts}, NsId, Timeout) ->
 %%%%%%%%%%%%%%%%%%%
 
 -spec complete_and_continue(
-    storage_opts(), namespace_id(), task_result(), process_updates(), process_state(), task()
+    storage_opts(), namespace_id(), task_result(), process_updates(), optional_process_state(), task()
 ) ->
     {ok, [task()]}.
 complete_and_continue(

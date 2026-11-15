@@ -46,16 +46,22 @@
     context => binary()
 }.
 
--type process_state() ::
-    #{
-        process_id := id(),
-        task_id := task_id(),
-        generation := generation(),
-        timestamp := timestamp_us(),
-        metadata => #{format => pos_integer()},
-        payload := binary()
-    }
-    | undefined.
+-type processor_state() :: #{
+    timestamp := timestamp_us(),
+    metadata => map(),
+    payload := binary()
+}.
+
+-type process_state() :: #{
+    process_id := id(),
+    task_id := task_id(),
+    generation := explicit_generation(),
+    timestamp := timestamp_us(),
+    metadata => map(),
+    payload := binary()
+}.
+
+-type optional_process_state() :: process_state() | undefined.
 
 %%%
 %%% Config options
@@ -125,13 +131,21 @@
 
 -type recipient() :: internal | external.
 
--type processor_intent() :: #{
-    state := process_state(),
-    action => action(),
-    response => term(),
-    aux_state => binary(),
-    metadata => map()
-}.
+-type processor_intent() ::
+    #{
+        state := processor_state(),
+        action => action(),
+        response => term(),
+        aux_state => binary(),
+        metadata => map()
+    }
+    | #{
+        action := remove,
+        state => processor_state() | undefined,
+        response => term(),
+        aux_state => binary(),
+        metadata => map()
+    }.
 -type processor_exception(Reason) :: {exception, _Class, Reason}.
 -type maybe_transient_error_reason() :: any().
 -type non_transient_error_reason() :: processor_exception(any()).

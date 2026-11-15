@@ -61,7 +61,7 @@ process(Pid, Deadline, #{namespace := NS} = NsOpts0, {TaskType, _, _} = Request,
     namespace_id(),
     task_result(),
     process_updates(),
-    process_state(),
+    optional_process_state(),
     task()
 ) -> {ok, [task()]} | no_return().
 complete_and_continue(Pid, _Deadline, StorageOpts, NsId, TaskResult, Process, ProcessState, Task) ->
@@ -181,15 +181,18 @@ handle_call(
     #prg_sidecar_state{} = State
 ) ->
     Response =
-        try Handler:process(Request, Options, Ctx) of
-            {ok, _Result} = OK ->
-                OK;
-            {error, Reason} = ERR ->
-                logger:error("processor error: ~p", [Reason]),
-                ERR;
-            Unsupported ->
-                logger:error("processor unexpected result: ~p", [Unsupported]),
-                {error, <<"unsupported_result">>}
+        try
+            case Handler:process(Request, Options, Ctx) of
+                {ok, Intent} ->
+                    ok = validate_intent_state(Intent),
+                    {ok, Intent};
+                {error, Reason} = ERR ->
+                    logger:error("processor error: ~p", [Reason]),
+                    ERR;
+                Unsupported ->
+                    logger:error("processor unexpected result: ~p", [Unsupported]),
+                    {error, <<"unsupported_result">>}
+            end
         catch
             Class:Term:Trace ->
                 logger:error("processor exception: ~p", [[Class, Term, Trace]]),
@@ -303,3 +306,22 @@ do_with_retry(Fun, Delay) ->
 add_handling_timeout(Timeout, #{processor := ProcessorConf} = NsOpts) ->
     ProcessorOpts = maps:get(options, ProcessorConf, #{}),
     NsOpts#{processor => ProcessorConf#{options => ProcessorOpts#{handling_timeout => Timeout}}}.
+
+validate_intent_state(#{action := remove}) ->
+    ok;
+validate_intent_state(#{state := #{timestamp := Timestamp, payload := Payload} = ProcessState}) when
+    is_integer(Timestamp), Timestamp >= 0, is_binary(Payload)
+->
+    case is_map(maps:get(metadata, ProcessState, #{})) of
+        true ->
+            _ = prg_utils:split_timestamp(Timestamp),
+            ok;
+        false ->
+            error({invalid_processor_state, invalid_metadata})
+    end;
+validate_intent_state(#{state := undefined}) ->
+    error({invalid_processor_state, undefined});
+validate_intent_state(Intent) when is_map(Intent), not is_map_key(state, Intent) ->
+    error({invalid_processor_state, missing});
+validate_intent_state(_) ->
+    error({invalid_processor_state, invalid_shape}).
