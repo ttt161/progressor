@@ -18,17 +18,17 @@ Progressor — библиотека Erlang/OTP для выполнения до�
 - `<<"running">>` — процесс доступен для команд; это не означает, что задача сейчас выполняется;
 - `<<"error">>` — для продолжения требуется восстановление.
 
-Это реализация с поколениями состояния, а не event sourcing. Схема и API истории событий с ней несовместимы; преобразования существующей базы событий не предусмотрено.
+Это реализация с поколениями состояния, а не event sourcing (https://github.com/valitydev/progressor). Схема и API истории событий с ней несовместимы; преобразования базы событий не предусмотрено.
 
 ## Подключение
 
-Добавьте Progressor в зависимости приложения и его список OTP applications. Для этой реализации выбирайте ревизию ветки `clear-progressor`; в production фиксируйте проверенный commit, поскольку API отличается от event-sourcing версий.
+Добавьте Progressor в зависимости приложения и его список OTP applications.
 
 Пример зависимости для разработки в `rebar.config`:
 
 ```erlang
 {deps, [
-    {progressor, {git, "https://github.com/valitydev/progressor.git", {branch, "clear-progressor"}}}
+    {progressor, {git, "https://github.com/ttt161/progressor.git", {branch, "main"}}}
 ]}.
 ```
 
@@ -68,7 +68,7 @@ Progressor — библиотека Erlang/OTP для выполнения до�
 ].
 ```
 
-Пароль в примере предназначен для локальной разработки; рабочие credentials передавайте через конфигурацию окружения приложения. Namespace — заранее заданный atom, `ProcessId` — binary. Не создавайте atoms из произвольного пользовательского ввода.
+Пароль в примере предназначен для локальной разработки; рабочие credentials передавайте через конфигурацию окружения приложения. Namespace — заранее заданный atom, `ProcessId` — binary.
 
 При запуске namespace библиотека применяет миграции через `epg_migrator`. Для отдельного этапа развёртывания можно заранее выполнить `prg_storage:db_init(StorageOpts, Namespace)` и отключить автоматическое применение параметром `{migration_enabled, false}` приложения `progressor`. Источник схемы — [priv/migrations](priv/migrations).
 
