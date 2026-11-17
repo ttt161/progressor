@@ -20,7 +20,7 @@ services:
     working_dir: $PWD
 
   postgres:
-    image: postgres:15-bookworm
+    image: postgres:17
     command: -c 'wal_level=logical'
     environment:
       POSTGRES_DB: "progressor_db"
