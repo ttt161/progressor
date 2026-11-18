@@ -1,6 +1,7 @@
 -module(prg_base_SUITE).
 
 -include_lib("stdlib/include/assert.hrl").
+-include_lib("progressor/include/progressor.hrl").
 
 %% API
 -export([
@@ -128,7 +129,7 @@ simple_timers_test(C) ->
     3 = expect_steps_counter(3),
     ExpectedAux = erlang:term_to_binary(<<"aux_state2">>),
     timer:sleep(?AWAIT_TIMEOUT(C)),
-    {ok, ?PROCESS_EXPECTED(Id, 3, 3, <<"active">>) = Process} = progressor:get(#{ns => ?NS(C), id => Id}),
+    {ok, ?PROCESS_EXPECTED(Id, 3, 3, ?PROCESS_STATUS_ACTIVE) = Process} = progressor:get(#{ns => ?NS(C), id => Id}),
     ?assertEqual(ExpectedAux, maps:get(aux_state, Process)),
     unmock_processor(),
     ok.
@@ -145,7 +146,7 @@ simple_call_test(C) ->
     {ok, <<"response">>} = progressor:call(#{ns => ?NS(C), id => Id, args => <<"call_args">>}),
     3 = expect_steps_counter(3),
     timer:sleep(?AWAIT_TIMEOUT(C)),
-    {ok, ?PROCESS_EXPECTED(Id, 3, 3, <<"active">>)} = progressor:get(#{ns => ?NS(C), id => Id}),
+    {ok, ?PROCESS_EXPECTED(Id, 3, 3, ?PROCESS_STATUS_ACTIVE)} = progressor:get(#{ns => ?NS(C), id => Id}),
     unmock_processor(),
     ok.
 %%
@@ -173,8 +174,10 @@ simple_call_with_generation_test(C) ->
     }),
     4 = expect_steps_counter(4),
     timer:sleep(?AWAIT_TIMEOUT(C)),
-    {ok, ?PROCESS_EXPECTED(Id, 4, 4, <<"active">>)} = progressor:get(#{ns => ?NS(C), id => Id}),
-    {ok, ?PROCESS_EXPECTED(Id, 2, 4, <<"active">>)} = progressor:get(#{ns => ?NS(C), id => Id, generation => 2}),
+    {ok, ?PROCESS_EXPECTED(Id, 4, 4, ?PROCESS_STATUS_ACTIVE)} = progressor:get(#{ns => ?NS(C), id => Id}),
+    {ok, ?PROCESS_EXPECTED(Id, 2, 4, ?PROCESS_STATUS_ACTIVE)} = progressor:get(#{
+        ns => ?NS(C), id => Id, generation => 2
+    }),
     unmock_processor(),
     ok.
 %%
@@ -192,20 +195,22 @@ missing_generation_test(C) ->
         Req = #{ns => ?NS(C), id => Id},
         {ok, ok} = progressor:init(Req#{args => <<"init_args">>}),
         timer:sleep(?AWAIT_TIMEOUT(C)),
-        {ok, ?PROCESS_EXPECTED(Id, 1, 1, <<"active">>)} = progressor:get(Req),
+        {ok, ?PROCESS_EXPECTED(Id, 1, 1, ?PROCESS_STATUS_ACTIVE)} = progressor:get(Req),
         {ok, InitialTrace} = progressor:trace(Req),
-        ?assertMatch([#{task_type := <<"init">>}], InitialTrace),
+        ?assertMatch([#{task_type := ?TASK_TYPE_INIT}], InitialTrace),
         ?assertEqual({error, {generation_not_found, 2}}, progressor:get(Req#{generation => 2})),
         Call = Req#{args => <<"call_args">>, idempotency_key => gen_id()},
         ?assertEqual({error, {generation_not_found, 2}}, progressor:call(Call#{generation => 2})),
         ?assertEqual({ok, InitialTrace}, progressor:trace(Req)),
         ?assertEqual(1, meck:num_calls(prg_ct_processor, process, '_')),
-        {ok, ?PROCESS_EXPECTED(Id, 1, 1, <<"active">>)} = progressor:get(Req),
+        {ok, ?PROCESS_EXPECTED(Id, 1, 1, ?PROCESS_STATUS_ACTIVE)} = progressor:get(Req),
         %% A rejected request must not consume its idempotency key.
         {ok, <<"response">>} = progressor:call(Call#{generation => 1}),
         timer:sleep(?AWAIT_TIMEOUT(C)),
-        {ok, ?PROCESS_EXPECTED(Id, 2, 2, <<"active">>)} = progressor:get(Req),
-        {ok, [#{task_type := <<"init">>}, #{task_type := <<"call">>, generation := 1}]} = progressor:trace(Req),
+        {ok, ?PROCESS_EXPECTED(Id, 2, 2, ?PROCESS_STATUS_ACTIVE)} = progressor:get(Req),
+        {ok, [#{task_type := ?TASK_TYPE_INIT}, #{task_type := ?TASK_TYPE_CALL, generation := 1}]} = progressor:trace(
+            Req
+        ),
         ?assertEqual(2, meck:num_calls(prg_ct_processor, process, '_'))
     after
         unmock_processor()
@@ -225,7 +230,7 @@ call_replace_timer_test(C) ->
     3 = expect_steps_counter(3),
     %% wait task_scan_timeout, maybe remove works
     timer:sleep(4000),
-    {ok, ?PROCESS_EXPECTED(Id, 3, 3, <<"active">>)} = progressor:get(#{ns => ?NS(C), id => Id}),
+    {ok, ?PROCESS_EXPECTED(Id, 3, 3, ?PROCESS_STATUS_ACTIVE)} = progressor:get(#{ns => ?NS(C), id => Id}),
     {ok, [
         #{
             args := <<"init_args">>,
@@ -236,8 +241,8 @@ call_replace_timer_test(C) ->
             state_metadata := #{<<"format_version">> := 1},
             state_payload := _,
             task_id := _,
-            task_type := <<"init">>,
-            task_status := <<"finished">>,
+            task_type := ?TASK_TYPE_INIT,
+            task_status := ?TASK_STATUS_FINISHED,
             scheduled := _,
             retry_interval := 0,
             retry_attempts := 0
@@ -249,8 +254,8 @@ call_replace_timer_test(C) ->
             generation := 1,
             state_generation := 2,
             task_id := _,
-            task_type := <<"call">>,
-            task_status := <<"finished">>,
+            task_type := ?TASK_TYPE_CALL,
+            task_status := ?TASK_STATUS_FINISHED,
             scheduled := _,
             retry_interval := 0,
             retry_attempts := 0
@@ -261,16 +266,16 @@ call_replace_timer_test(C) ->
             generation := 2,
             state_generation := 3,
             task_id := _,
-            task_type := <<"timeout">>,
-            task_status := <<"finished">>,
+            task_type := ?TASK_TYPE_TIMEOUT,
+            task_status := ?TASK_STATUS_FINISHED,
             scheduled := _,
             retry_interval := 0,
             retry_attempts := 0
         },
         #{
             task_id := _,
-            task_type := <<"remove">>,
-            task_status := <<"cancelled">>,
+            task_type := ?TASK_TYPE_REMOVE,
+            task_status := ?TASK_STATUS_CANCELLED,
             scheduled := _,
             retry_interval := 0,
             retry_attempts := 0
@@ -291,7 +296,7 @@ call_unset_timer_test(C) ->
     %% wait 3 steps but got 2 - good!
     2 = expect_steps_counter(3),
     timer:sleep(?AWAIT_TIMEOUT(C)),
-    {ok, ?PROCESS_EXPECTED(Id, 2, 2, <<"active">>)} = progressor:get(#{ns => ?NS(C), id => Id}),
+    {ok, ?PROCESS_EXPECTED(Id, 2, 2, ?PROCESS_STATUS_ACTIVE)} = progressor:get(#{ns => ?NS(C), id => Id}),
     unmock_processor(),
     ok.
 %%
@@ -309,7 +314,7 @@ postponed_call_test(C) ->
     {ok, <<"response">>} = progressor:call(#{ns => ?NS(C), id => Id, args => <<"call_args">>}),
     4 = expect_steps_counter(4),
     timer:sleep(?AWAIT_TIMEOUT(C)),
-    {ok, ?PROCESS_EXPECTED(Id, 4, 4, <<"active">>)} = progressor:get(#{ns => ?NS(C), id => Id}),
+    {ok, ?PROCESS_EXPECTED(Id, 4, 4, ?PROCESS_STATUS_ACTIVE)} = progressor:get(#{ns => ?NS(C), id => Id}),
     unmock_processor(),
     ok.
 %%
@@ -325,7 +330,7 @@ postponed_call_to_suspended_process_test(C) ->
     {ok, <<"response">>} = progressor:call(#{ns => ?NS(C), id => Id, args => <<"call_args">>}),
     3 = expect_steps_counter(3),
     timer:sleep(?AWAIT_TIMEOUT(C)),
-    {ok, ?PROCESS_EXPECTED(Id, 3, 3, <<"active">>)} = progressor:get(#{ns => ?NS(C), id => Id}),
+    {ok, ?PROCESS_EXPECTED(Id, 3, 3, ?PROCESS_STATUS_ACTIVE)} = progressor:get(#{ns => ?NS(C), id => Id}),
     unmock_processor(),
     ok.
 %%
@@ -347,7 +352,7 @@ multiple_calls_test(C) ->
     ),
     11 = expect_steps_counter(33),
     timer:sleep(?AWAIT_TIMEOUT(C)),
-    {ok, ?PROCESS_EXPECTED(Id, 11, 11, <<"active">>)} = progressor:get(#{ns => ?NS(C), id => Id}),
+    {ok, ?PROCESS_EXPECTED(Id, 11, 11, ?PROCESS_STATUS_ACTIVE)} = progressor:get(#{ns => ?NS(C), id => Id}),
     unmock_processor(),
     ok.
 
@@ -364,18 +369,18 @@ simple_repair_after_non_retriable_error_test(C) ->
     2 = expect_steps_counter(2),
     timer:sleep(?AWAIT_TIMEOUT(C)),
     {ok, #{
-        status := <<"corrupted">>,
+        status := ?PROCESS_STATUS_CORRUPTED,
         state := #{generation := 1},
         process_id := Id,
         current_generation := 1,
         detail := <<"do_not_retry">>,
         corrupted_by := _,
-        corrupted_type := <<"timeout">>
+        corrupted_type := ?TASK_TYPE_TIMEOUT
     }} = progressor:get(#{ns => ?NS(C), id => Id}),
     {ok, ok} = progressor:simple_repair(#{ns => ?NS(C), id => Id, context => <<"simple_repair_ctx">>}),
     4 = expect_steps_counter(4),
     timer:sleep(?AWAIT_TIMEOUT(C)),
-    {ok, ?PROCESS_EXPECTED(Id, 3, 3, <<"active">>) = Process} = progressor:get(#{ns => ?NS(C), id => Id}),
+    {ok, ?PROCESS_EXPECTED(Id, 3, 3, ?PROCESS_STATUS_ACTIVE) = Process} = progressor:get(#{ns => ?NS(C), id => Id}),
     false = erlang:is_map_key(detail, Process),
     false = erlang:is_map_key(corrupted_by, Process),
     false = erlang:is_map_key(corrupted_type, Process),
@@ -394,18 +399,18 @@ repair_after_non_retriable_error_test(C) ->
     2 = expect_steps_counter(2),
     timer:sleep(?AWAIT_TIMEOUT(C)),
     {ok, #{
-        status := <<"corrupted">>,
+        status := ?PROCESS_STATUS_CORRUPTED,
         state := #{generation := 1},
         process_id := Id,
         current_generation := 1,
         detail := <<"do_not_retry">>,
         corrupted_by := _,
-        corrupted_type := <<"timeout">>
+        corrupted_type := ?TASK_TYPE_TIMEOUT
     }} = progressor:get(#{ns => ?NS(C), id => Id}),
     {ok, ok} = progressor:repair(#{ns => ?NS(C), id => Id, args => <<"repair_args">>}),
     3 = expect_steps_counter(4),
     timer:sleep(?AWAIT_TIMEOUT(C)),
-    {ok, ?PROCESS_EXPECTED(Id, 2, 2, <<"active">>) = Process} = progressor:get(#{ns => ?NS(C), id => Id}),
+    {ok, ?PROCESS_EXPECTED(Id, 2, 2, ?PROCESS_STATUS_ACTIVE) = Process} = progressor:get(#{ns => ?NS(C), id => Id}),
     false = erlang:is_map_key(detail, Process),
     false = erlang:is_map_key(corrupted_by, Process),
     false = erlang:is_map_key(corrupted_type, Process),
@@ -425,13 +430,13 @@ error_after_max_retries_test(C) ->
     4 = expect_steps_counter(4),
     timer:sleep(?AWAIT_TIMEOUT(C)),
     {ok, #{
-        status := <<"corrupted">>,
+        status := ?PROCESS_STATUS_CORRUPTED,
         state := #{generation := 1},
         process_id := Id,
         current_generation := 1,
         detail := <<"retry_this">>,
         corrupted_by := _,
-        corrupted_type := <<"timeout">>
+        corrupted_type := ?TASK_TYPE_TIMEOUT
     }} = progressor:get(#{ns => ?NS(C), id => Id}),
     unmock_processor(),
     ok.
@@ -450,13 +455,13 @@ repair_after_call_error_test(C) ->
     2 = expect_steps_counter(2),
     timer:sleep(?AWAIT_TIMEOUT(C)),
     {ok, #{
-        status := <<"corrupted">>,
+        status := ?PROCESS_STATUS_CORRUPTED,
         state := #{generation := 1},
         process_id := Id,
         current_generation := 1,
         detail := <<"retry_this">>,
         corrupted_by := CorruptionTask,
-        corrupted_type := <<"call">>
+        corrupted_type := ?TASK_TYPE_CALL
     }} = progressor:get(#{ns => ?NS(C), id => Id}),
     {error, <<"repair_error">>} = progressor:repair(#{
         ns => ?NS(C), id => Id, args => <<"bad_repair_args">>
@@ -465,18 +470,18 @@ repair_after_call_error_test(C) ->
     timer:sleep(?AWAIT_TIMEOUT(C)),
     %% shoul not rewrite detail
     {ok, #{
-        status := <<"corrupted">>,
+        status := ?PROCESS_STATUS_CORRUPTED,
         state := #{generation := 1},
         process_id := Id,
         current_generation := 1,
         detail := <<"retry_this">>,
         corrupted_by := CorruptionTask,
-        corrupted_type := <<"call">>
+        corrupted_type := ?TASK_TYPE_CALL
     }} = progressor:get(#{ns => ?NS(C), id => Id}),
     {ok, ok} = progressor:repair(#{ns => ?NS(C), id => Id, args => <<"repair_args">>}),
     4 = expect_steps_counter(4),
     timer:sleep(?AWAIT_TIMEOUT(C)),
-    {ok, ?PROCESS_EXPECTED(Id, 2, 2, <<"active">>) = Process} = progressor:get(#{ns => ?NS(C), id => Id}),
+    {ok, ?PROCESS_EXPECTED(Id, 2, 2, ?PROCESS_STATUS_ACTIVE) = Process} = progressor:get(#{ns => ?NS(C), id => Id}),
     false = erlang:is_map_key(detail, Process),
     false = erlang:is_map_key(corrupted_by, Process),
     false = erlang:is_map_key(corrupted_type, Process),
@@ -492,7 +497,7 @@ remove_by_timer_test(C) ->
     Id = gen_id(),
     {ok, ok} = progressor:init(#{ns => ?NS(C), id => Id, args => <<"init_args">>}),
     timer:sleep(?AWAIT_TIMEOUT(C)),
-    {ok, ?PROCESS_EXPECTED(Id, 1, 1, <<"active">>)} = progressor:get(#{ns => ?NS(C), id => Id}),
+    {ok, ?PROCESS_EXPECTED(Id, 1, 1, ?PROCESS_STATUS_ACTIVE)} = progressor:get(#{ns => ?NS(C), id => Id}),
     %% wait tsk_scan_timeout
     timer:sleep(4000),
     {error, <<"process not found">>} = progressor:get(#{ns => ?NS(C), id => Id}),
@@ -508,7 +513,7 @@ remove_without_timer_test(C) ->
     Id = gen_id(),
     {ok, ok} = progressor:init(#{ns => ?NS(C), id => Id, args => <<"init_args">>}),
     timer:sleep(?AWAIT_TIMEOUT(C)),
-    {ok, ?PROCESS_EXPECTED(Id, 1, 1, <<"active">>)} = progressor:get(#{ns => ?NS(C), id => Id}),
+    {ok, ?PROCESS_EXPECTED(Id, 1, 1, ?PROCESS_STATUS_ACTIVE)} = progressor:get(#{ns => ?NS(C), id => Id}),
     2 = expect_steps_counter(2),
     timer:sleep(?AWAIT_TIMEOUT(C)),
     {error, <<"process not found">>} = progressor:get(#{ns => ?NS(C), id => Id}),
@@ -527,7 +532,7 @@ reschedule_after_call_test(C) ->
     {ok, <<"response">>} = progressor:call(#{ns => ?NS(C), id => Id, args => <<"call_args">>}),
     3 = expect_steps_counter(3),
     timer:sleep(?AWAIT_TIMEOUT(C)),
-    {ok, ?PROCESS_EXPECTED(Id, 3, 3, <<"active">>)} = progressor:get(#{ns => ?NS(C), id => Id}),
+    {ok, ?PROCESS_EXPECTED(Id, 3, 3, ?PROCESS_STATUS_ACTIVE)} = progressor:get(#{ns => ?NS(C), id => Id}),
     unmock_processor(),
     ok.
 %%
@@ -547,15 +552,15 @@ simple_repair_after_call_error_test(C) ->
     {ok, #{
         detail := <<"retry_this">>,
         corrupted_by := CorruptionTask,
-        corrupted_type := <<"call">>,
+        corrupted_type := ?TASK_TYPE_CALL,
         metadata := #{<<"k">> := <<"v">>},
         state := #{generation := 1},
         process_id := Id,
-        status := <<"corrupted">>,
-        previous_status := <<"active">>
+        status := ?PROCESS_STATUS_CORRUPTED,
+        previous_status := ?PROCESS_STATUS_ACTIVE
     }} = progressor:get(#{ns => ?NS(C), id => Id}),
     {ok, BeforeTrace} = progressor:trace(#{ns => ?NS(C), id => Id}),
-    ?assertMatch([_, #{task_id := CorruptionTask, task_type := <<"call">>}], BeforeTrace),
+    ?assertMatch([_, #{task_id := CorruptionTask, task_type := ?TASK_TYPE_CALL}], BeforeTrace),
     {ok, ok} = progressor:simple_repair(#{ns => ?NS(C), id => Id}),
     timer:sleep(?AWAIT_TIMEOUT(C)),
     {ok,
@@ -563,8 +568,8 @@ simple_repair_after_call_error_test(C) ->
             metadata := #{<<"k">> := <<"v">>},
             state := #{generation := 1},
             process_id := Id,
-            status := <<"active">>,
-            previous_status := <<"corrupted">>
+            status := ?PROCESS_STATUS_ACTIVE,
+            previous_status := ?PROCESS_STATUS_CORRUPTED
         } = Process} = progressor:get(#{ns => ?NS(C), id => Id}),
     ?assertNot(maps:is_key(corrupted_by, Process)),
     ?assertNot(maps:is_key(corrupted_type, Process)),

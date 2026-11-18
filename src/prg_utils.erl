@@ -122,6 +122,6 @@ format_microseconds(Val) ->
 
 -spec action_to_task_type(scheduled_action()) -> task_type().
 action_to_task_type(timeout) ->
-    <<"timeout">>;
+    ?TASK_TYPE_TIMEOUT;
 action_to_task_type(remove) ->
-    <<"remove">>.
+    ?TASK_TYPE_REMOVE.

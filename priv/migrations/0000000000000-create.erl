@@ -54,7 +54,7 @@ perform(Connection, MigrationOpts) ->
             false ->
                 {ok, _, _} = epg_pool:query(
                     Connection,
-                    "CREATE TYPE task_type AS ENUM ('init', 'timeout', 'call', 'notify', 'repair', 'remove')"
+                    "CREATE TYPE task_type AS ENUM ('init', 'timeout', 'call', 'repair', 'remove')"
                 )
         end,
     %% create processes table
