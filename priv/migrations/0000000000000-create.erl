@@ -23,7 +23,7 @@ perform(Connection, MigrationOpts) ->
             false ->
                 {ok, _, _} = epg_pool:query(
                     Connection,
-                    "CREATE TYPE process_status AS ENUM ('init', 'running', 'error')"
+                    "CREATE TYPE process_status AS ENUM ('init', 'active', 'corrupted')"
                 )
         end,
     %% create type task_status if not exists
@@ -54,7 +54,7 @@ perform(Connection, MigrationOpts) ->
             false ->
                 {ok, _, _} = epg_pool:query(
                     Connection,
-                    "CREATE TYPE task_type AS ENUM ('init', 'timeout', 'call', 'notify', 'repair', 'remove')"
+                    "CREATE TYPE task_type AS ENUM ('init', 'timeout', 'call', 'repair', 'remove')"
                 )
         end,
     %% create processes table
@@ -67,6 +67,7 @@ perform(Connection, MigrationOpts) ->
             "detail TEXT, "
             "aux_state BYTEA, "
             "current_generation INTEGER, "
+            "corrupted_type task_type, "
             "previous_status process_status NOT NULL, "
             "status_changed_at TIMESTAMP WITH TIME ZONE NOT NULL, "
             "created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(), "

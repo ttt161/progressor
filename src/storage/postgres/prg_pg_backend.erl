@@ -159,7 +159,8 @@ repair_process(PgOpts, NsId, ProcessId) ->
     {ok, 1} = epg_pool:query(
         Pool,
         "UPDATE " ++ ProcessesTable ++
-            " SET status = 'running', previous_status = 'error', corrupted_by = null, detail = null "
+            " SET status = 'active', previous_status = 'corrupted', "
+            "corrupted_by = null, corrupted_type = null, detail = null "
             "WHERE process_id = $1",
         [ProcessId]
     ),
@@ -244,7 +245,7 @@ collect_zombies(PgOpts, NsId, Timeout) ->
                 "WITH zombie_tasks as ("
                 "  DELETE FROM " ++ RunningTable ++
                     " WHERE running_time < $1 "
-                    "    RETURNING process_id, task_id"
+                    "    RETURNING process_id, task_id, task_type"
                     "  ), "
                     "  t1 AS (UPDATE " ++ TaskTable ++
                     " SET status = 'cancelled' WHERE status IN ('waiting', 'blocked') "
@@ -256,9 +257,9 @@ collect_zombies(PgOpts, NsId, Timeout) ->
                     "MERGE INTO " ++ ProcessesTable ++
                     " AS pt USING zombie_tasks AS zt ON pt.process_id = zt.process_id "
                     "  WHEN MATCHED THEN UPDATE SET"
-                    "  status = 'error',"
+                    "  status = 'corrupted',"
                     "  detail = 'zombie detected',"
-                    "  corrupted_by = zt.task_id",
+                    "  corrupted_by = zt.task_id, corrupted_type = zt.task_type",
                 [TsBackward, Now]
             )
         end
@@ -354,7 +355,7 @@ reschedule_task(PgOpts, NsId, #{task_id := TaskId} = Task) ->
     } = prg_pg_utils:tables(NsId),
     ScheduledTask = maps:merge(
         maps:without([running_time], Task),
-        #{status => <<"waiting">>}
+        #{status => ?TASK_STATUS_WAITING}
     ),
     epg_pool:transaction(
         Pool,
@@ -421,10 +422,10 @@ prepare_init(PgOpts, NsId, ProcessId, Task) ->
                 {ok, _} ->
                     {ok, _, _, [{TaskId}]} = do_save_task(Connection, TaskTable, Task),
                     case Task of
-                        #{status := <<"running">>} ->
+                        #{status := ?TASK_STATUS_RUNNING} ->
                             {ok, _, _, _} = do_save_running(Connection, RunningTable, Task#{task_id => TaskId}),
                             {ok, {continue, TaskId}};
-                        #{status := <<"waiting">>} ->
+                        #{status := ?TASK_STATUS_WAITING} ->
                             {ok, _, _, _} = do_save_schedule(Connection, ScheduleTable, Task#{task_id => TaskId}),
                             {ok, {postpone, TaskId}}
                     end;
@@ -436,7 +437,7 @@ prepare_init(PgOpts, NsId, ProcessId, Task) ->
 
 -spec prepare_call(pg_opts(), namespace_id(), id(), task()) ->
     {ok, {postpone, task_id()} | {continue, task_id()}} | {error, _Error}.
-prepare_call(PgOpts, NsId, ProcessId, #{status := <<"waiting">>} = Task) ->
+prepare_call(PgOpts, NsId, ProcessId, #{status := ?TASK_STATUS_WAITING} = Task) ->
     Pool = get_pool(external, PgOpts),
     #{
         tasks := TaskTable,
@@ -451,7 +452,7 @@ prepare_call(PgOpts, NsId, ProcessId, #{status := <<"waiting">>} = Task) ->
             {ok, {postpone, TaskId}}
         end
     );
-prepare_call(PgOpts, NsId, ProcessId, #{status := <<"running">>} = Task) ->
+prepare_call(PgOpts, NsId, ProcessId, #{status := ?TASK_STATUS_RUNNING} = Task) ->
     Pool = get_pool(external, PgOpts),
     #{
         tasks := TaskTable,
@@ -466,7 +467,7 @@ prepare_call(PgOpts, NsId, ProcessId, #{status := <<"running">>} = Task) ->
             case do_save_running(C, RunningTable, Task#{task_id => TaskId}) of
                 {ok, _, _, []} ->
                     {ok, _, _, _} =
-                        do_save_schedule(C, ScheduleTable, Task#{task_id => TaskId, status => <<"waiting">>}),
+                        do_save_schedule(C, ScheduleTable, Task#{task_id => TaskId, status => ?TASK_STATUS_WAITING}),
                     {ok, {postpone, TaskId}};
                 {ok, _, _, [{TaskId}]} ->
                     {ok, {continue, TaskId}}
@@ -476,7 +477,7 @@ prepare_call(PgOpts, NsId, ProcessId, #{status := <<"running">>} = Task) ->
 
 -spec prepare_repair(pg_opts(), namespace_id(), id(), task()) ->
     {ok, {postpone, task_id()} | {continue, task_id()}} | {error, _Reason}.
-prepare_repair(PgOpts, NsId, _ProcessId, #{status := <<"waiting">>} = Task) ->
+prepare_repair(PgOpts, NsId, _ProcessId, #{status := ?TASK_STATUS_WAITING} = Task) ->
     Pool = get_pool(external, PgOpts),
     #{
         tasks := TaskTable,
@@ -490,7 +491,7 @@ prepare_repair(PgOpts, NsId, _ProcessId, #{status := <<"waiting">>} = Task) ->
             {ok, {postpone, TaskId}}
         end
     );
-prepare_repair(PgOpts, NsId, _ProcessId, #{status := <<"running">>} = Task) ->
+prepare_repair(PgOpts, NsId, _ProcessId, #{status := ?TASK_STATUS_RUNNING} = Task) ->
     Pool = get_pool(external, PgOpts),
     #{
         tasks := TaskTable,
@@ -502,7 +503,7 @@ prepare_repair(PgOpts, NsId, _ProcessId, #{status := <<"running">>} = Task) ->
             {ok, _, _, [{TaskId}]} = do_save_task(C, TaskTable, Task),
             case do_save_running(C, RunningTable, Task#{task_id => TaskId}) of
                 {ok, _, _, []} ->
-                    {error, <<"process is running">>};
+                    {error, <<"process is active">>};
                 {ok, _, _, [{TaskId}]} ->
                     {ok, {continue, TaskId}}
             end
@@ -546,14 +547,14 @@ complete_and_continue(PgOpts, NsId, TaskResult, ProcessUpdates, NextState, NextT
             of
                 {ok, _, _, []} ->
                     case NextTask of
-                        #{status := <<"running">>} ->
+                        #{status := ?TASK_STATUS_RUNNING} ->
                             do_save_running(
                                 Connection,
                                 RunningTable,
                                 NextTask#{task_id => NextTaskId, running_time => erlang:system_time(microsecond)},
                                 " * "
                             );
-                        #{status := <<"waiting">>} ->
+                        #{status := ?TASK_STATUS_WAITING} ->
                             do_save_schedule(
                                 Connection,
                                 ScheduleTable,
@@ -566,7 +567,7 @@ complete_and_continue(PgOpts, NsId, TaskResult, ProcessUpdates, NextState, NextT
                     {ok, _, _, [{NextTaskId}]} = do_save_schedule(
                         Connection,
                         ScheduleTable,
-                        NextTask#{task_id => NextTaskId, status => <<"blocked">>}
+                        NextTask#{task_id => NextTaskId, status => ?TASK_STATUS_BLOCKED}
                     ),
                     {ok, 1, Col, Row}
             end
@@ -1006,7 +1007,7 @@ do_complete_task(Connection, TaskTable, ScheduleTable, RunningTable, TaskResult)
         ]
     ),
     case Status of
-        <<"error">> ->
+        ?TASK_STATUS_ERROR ->
             %% do nothing
             {ok, 0, [], []};
         _ ->

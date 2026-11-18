@@ -8,6 +8,7 @@
     aux_state,
     metadata,
     corrupted_by,
+    corrupted_type,
     previous_status,
     status_changed_at,
     current_generation
@@ -21,6 +22,7 @@
     metadata => map(),
     state => process_state(),
     corrupted_by => task_id(),
+    corrupted_type => task_type(),
     current_generation => explicit_generation(),
     previous_status => process_status(),
     created_at => timestamp_us(),
@@ -121,9 +123,9 @@
 % <<"waiting">> | <<"running">> | <<"blocked">> | <<"error">> | <<"finished">> | <<"cancelled">>
 
 -type task_type() :: binary().
-% <<"init">> | <<"call">> | <<"notify">> | <<"repair">> | <<"timeout">>
+% <<"init">> | <<"call">> | <<"repair">> | <<"timeout">>
 
--type task_t() :: init | call | repair | notify | timeout | remove.
+-type task_t() :: init | call | repair | timeout | remove.
 -type task_origin() :: {pid(), reference()}.
 -type task_header() :: {task_t(), task_origin() | undefined}.
 
@@ -201,6 +203,22 @@
 %%%
 %%% Constants
 %%%
+-define(PROCESS_STATUS_ACTIVE, <<"active">>).
+-define(PROCESS_STATUS_CORRUPTED, <<"corrupted">>).
+
+-define(TASK_TYPE_INIT, <<"init">>).
+-define(TASK_TYPE_CALL, <<"call">>).
+-define(TASK_TYPE_REPAIR, <<"repair">>).
+-define(TASK_TYPE_TIMEOUT, <<"timeout">>).
+-define(TASK_TYPE_REMOVE, <<"remove">>).
+
+-define(TASK_STATUS_WAITING, <<"waiting">>).
+-define(TASK_STATUS_RUNNING, <<"running">>).
+-define(TASK_STATUS_BLOCKED, <<"blocked">>).
+-define(TASK_STATUS_ERROR, <<"error">>).
+-define(TASK_STATUS_FINISHED, <<"finished">>).
+-define(TASK_STATUS_CANCELLED, <<"cancelled">>).
+
 -define(DEFAULT_STEP_TIMEOUT_SEC, 60).
 -define(DEFAULT_CALL_SCAN_TIMEOUT_SEC, 3).
 

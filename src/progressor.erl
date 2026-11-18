@@ -56,7 +56,7 @@ call(Req) ->
         [
             fun add_ns_opts/1,
             fun check_idempotency/1,
-            fun(Data) -> check_process_status(Data, <<"running">>) end,
+            fun(Data) -> check_process_status(Data, ?PROCESS_STATUS_ACTIVE) end,
             fun check_generation/1,
             fun add_task/1,
             fun(Data) -> prepare(fun prg_storage:prepare_call/4, Data) end,
@@ -71,7 +71,7 @@ repair(Req) ->
         [
             fun add_ns_opts/1,
             fun check_idempotency/1,
-            fun(Data) -> check_process_status(Data, <<"error">>) end,
+            fun(Data) -> check_process_status(Data, ?PROCESS_STATUS_CORRUPTED) end,
             fun add_task/1,
             fun(Data) -> prepare(fun prg_storage:prepare_repair/4, Data) end,
             fun process_call/1
@@ -188,16 +188,13 @@ check_process_continuation(
     #{ns_opts := #{storage := StorageOpts}, id := Id, ns := NsId} = Opts
 ) ->
     case prg_storage:get_process(external, StorageOpts, NsId, Id, latest) of
-        {ok, #{status := <<"running">>}} ->
-            {error, <<"process is running">>};
-        {ok, #{status := <<"error">>, corrupted_by := TaskId}} when is_integer(TaskId) ->
-            case prg_storage:get_task(external, StorageOpts, NsId, TaskId) of
-                {ok, #{task_type := Type}} when Type =:= <<"timeout">>; Type =:= <<"remove">> ->
-                    add_task(Opts#{type => Type});
-                {ok, _} ->
-                    Opts
-            end;
-        {ok, #{status := <<"error">>}} ->
+        {ok, #{status := ?PROCESS_STATUS_ACTIVE}} ->
+            {error, <<"process is active">>};
+        {ok, #{status := ?PROCESS_STATUS_CORRUPTED, corrupted_type := Type}} when
+            Type =:= ?TASK_TYPE_TIMEOUT; Type =:= ?TASK_TYPE_REMOVE
+        ->
+            add_task(Opts#{type => Type});
+        {ok, #{status := ?PROCESS_STATUS_CORRUPTED}} ->
             Opts;
         {error, _} = Error ->
             Error
@@ -247,7 +244,7 @@ prepare_postponed(
 ) ->
     TaskType = maps:get(task_type, Task),
     PrepareResult = prg_utils:with_observe(
-        fun() -> Fun(StorageOpts, NsId, ProcessId, Task#{status => <<"waiting">>}) end,
+        fun() -> Fun(StorageOpts, NsId, ProcessId, Task#{status => ?TASK_STATUS_WAITING}) end,
         ?PREPARING_KEY,
         [erlang:atom_to_binary(NsId, utf8), TaskType]
     ),
@@ -340,55 +337,40 @@ make_task_header(repair, Ref) ->
 make_task_header(timeout, _Ref) ->
     {timeout, undefined};
 make_task_header(remove, _Ref) ->
-    {remove, undefined};
-make_task_header(notify, _Ref) ->
-    {notify, undefined}.
+    {remove, undefined}.
 
 convert_task_type(init) ->
-    <<"init">>;
+    ?TASK_TYPE_INIT;
 convert_task_type(call) ->
-    <<"call">>;
-convert_task_type(notify) ->
-    <<"notify">>;
+    ?TASK_TYPE_CALL;
 convert_task_type(timeout) ->
-    <<"timeout">>;
+    ?TASK_TYPE_TIMEOUT;
 convert_task_type(repair) ->
-    <<"repair">>;
+    ?TASK_TYPE_REPAIR;
 convert_task_type(Type) when is_binary(Type) ->
     Type.
 
 make_task(#{task_type := TaskType} = TaskData) when
-    TaskType =:= <<"init">>;
-    TaskType =:= <<"call">>;
-    TaskType =:= <<"repair">>
+    TaskType =:= ?TASK_TYPE_INIT;
+    TaskType =:= ?TASK_TYPE_CALL;
+    TaskType =:= ?TASK_TYPE_REPAIR
 ->
     Now = erlang:system_time(microsecond),
     Defaults = #{
-        status => <<"running">>,
+        status => ?TASK_STATUS_RUNNING,
         scheduled_time => Now,
         running_time => Now,
         last_retry_interval => 0,
         attempts_count => 0
     },
     maps:filter(fun(_K, V) -> V =/= undefined end, maps:merge(Defaults, TaskData));
-make_task(#{task_type := TaskType} = TaskData) when TaskType =:= <<"timeout">>; TaskType =:= <<"remove">> ->
+make_task(#{task_type := TaskType} = TaskData) when TaskType =:= ?TASK_TYPE_TIMEOUT; TaskType =:= ?TASK_TYPE_REMOVE ->
     Now = erlang:system_time(microsecond),
     Defaults = #{
         %% TODO
         metadata => #{<<"kind">> => <<"simple_repair">>},
-        status => <<"waiting">>,
+        status => ?TASK_STATUS_WAITING,
         scheduled_time => Now,
-        last_retry_interval => 0,
-        attempts_count => 0
-    },
-    maps:filter(fun(_K, V) -> V =/= undefined end, maps:merge(Defaults, TaskData));
-make_task(#{task_type := <<"notify">>} = TaskData) ->
-    Now = erlang:system_time(microsecond),
-    Defaults = #{
-        status => <<"running">>,
-        scheduled_time => Now,
-        running_time => Now,
-        response => term_to_binary({ok, ok}),
         last_retry_interval => 0,
         attempts_count => 0
     },
@@ -406,6 +388,6 @@ return_worker(NsId, Worker) ->
     prg_scheduler:return_worker(NsId, self(), Worker).
 
 check_for_run(undefined) ->
-    <<"waiting">>;
+    ?TASK_STATUS_WAITING;
 check_for_run(Pid) when is_pid(Pid) ->
-    <<"running">>.
+    ?TASK_STATUS_RUNNING.

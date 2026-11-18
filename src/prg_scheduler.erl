@@ -245,7 +245,7 @@ do_push_task(TaskHeader, Task, State) ->
     end.
 
 header() ->
-    header(<<"timeout">>).
+    header(?TASK_TYPE_TIMEOUT).
 
 header(Type) ->
     {erlang:binary_to_atom(Type), undefined}.
