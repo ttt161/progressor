@@ -56,7 +56,7 @@ call(Req) ->
         [
             fun add_ns_opts/1,
             fun check_idempotency/1,
-            fun(Data) -> check_process_status(Data, <<"running">>) end,
+            fun(Data) -> check_process_status(Data, <<"active">>) end,
             fun check_generation/1,
             fun add_task/1,
             fun(Data) -> prepare(fun prg_storage:prepare_call/4, Data) end,
@@ -71,7 +71,7 @@ repair(Req) ->
         [
             fun add_ns_opts/1,
             fun check_idempotency/1,
-            fun(Data) -> check_process_status(Data, <<"error">>) end,
+            fun(Data) -> check_process_status(Data, <<"corrupted">>) end,
             fun add_task/1,
             fun(Data) -> prepare(fun prg_storage:prepare_repair/4, Data) end,
             fun process_call/1
@@ -188,11 +188,11 @@ check_process_continuation(
     #{ns_opts := #{storage := StorageOpts}, id := Id, ns := NsId} = Opts
 ) ->
     case prg_storage:get_process(external, StorageOpts, NsId, Id, latest) of
-        {ok, #{status := <<"running">>}} ->
-            {error, <<"process is running">>};
-        {ok, #{status := <<"error">>, corrupted_type := Type}} when Type =:= <<"timeout">>; Type =:= <<"remove">> ->
+        {ok, #{status := <<"active">>}} ->
+            {error, <<"process is active">>};
+        {ok, #{status := <<"corrupted">>, corrupted_type := Type}} when Type =:= <<"timeout">>; Type =:= <<"remove">> ->
             add_task(Opts#{type => Type});
-        {ok, #{status := <<"error">>}} ->
+        {ok, #{status := <<"corrupted">>}} ->
             Opts;
         {error, _} = Error ->
             Error

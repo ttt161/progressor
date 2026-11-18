@@ -159,7 +159,7 @@ repair_process(PgOpts, NsId, ProcessId) ->
     {ok, 1} = epg_pool:query(
         Pool,
         "UPDATE " ++ ProcessesTable ++
-            " SET status = 'running', previous_status = 'error', "
+            " SET status = 'active', previous_status = 'corrupted', "
             "corrupted_by = null, corrupted_type = null, detail = null "
             "WHERE process_id = $1",
         [ProcessId]
@@ -257,7 +257,7 @@ collect_zombies(PgOpts, NsId, Timeout) ->
                     "MERGE INTO " ++ ProcessesTable ++
                     " AS pt USING zombie_tasks AS zt ON pt.process_id = zt.process_id "
                     "  WHEN MATCHED THEN UPDATE SET"
-                    "  status = 'error',"
+                    "  status = 'corrupted',"
                     "  detail = 'zombie detected',"
                     "  corrupted_by = zt.task_id, corrupted_type = zt.task_type",
                 [TsBackward, Now]
@@ -503,7 +503,7 @@ prepare_repair(PgOpts, NsId, _ProcessId, #{status := <<"running">>} = Task) ->
             {ok, _, _, [{TaskId}]} = do_save_task(C, TaskTable, Task),
             case do_save_running(C, RunningTable, Task#{task_id => TaskId}) of
                 {ok, _, _, []} ->
-                    {error, <<"process is running">>};
+                    {error, <<"process is active">>};
                 {ok, _, _, [{TaskId}]} ->
                     {ok, {continue, TaskId}}
             end

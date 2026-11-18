@@ -23,7 +23,7 @@ perform(Connection, MigrationOpts) ->
             false ->
                 {ok, _, _} = epg_pool:query(
                     Connection,
-                    "CREATE TYPE process_status AS ENUM ('init', 'running', 'error')"
+                    "CREATE TYPE process_status AS ENUM ('init', 'active', 'corrupted')"
                 )
         end,
     %% create type task_status if not exists

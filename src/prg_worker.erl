@@ -469,38 +469,38 @@ error_and_retry({error, Reason} = Response, TaskHeader, Task, Deadline, State) -
     ok = next_task(self()),
     State#prg_worker_state{process = undefined}.
 
-update_process(#{status := <<"error">>, process_id := ProcessId} = Process, {error, _}) ->
+update_process(#{status := <<"corrupted">>, process_id := ProcessId} = Process, {error, _}) ->
     %% process error when already broken
     {Process, #{process_id => ProcessId}};
 update_process(
     #{status := Status, process_id := ProcessId} = Process,
     {error, {Detail, #{task_id := TaskId, task_type := TaskType}}}
 ) when
-    Status =:= <<"running">>;
+    Status =:= <<"active">>;
     Status =:= <<"init">>
 ->
-    %% process broken (transition from running/init to error)
+    %% process broken (transition from active/init to corrupted)
     StatusChangedAt = erlang:system_time(microsecond),
     ProcessUpdates = #{
         process_id => ProcessId,
-        status => <<"error">>,
+        status => <<"corrupted">>,
         previous_status => Status,
         status_changed_at => StatusChangedAt,
         detail => Detail
     },
     Updates = ProcessUpdates#{corrupted_by => TaskId, corrupted_type => TaskType},
     {maps:merge(Process, Updates), Updates};
-update_process(#{status := <<"error">>, process_id := ProcessId} = Process, Intent) ->
-    %% process repaired (transition from error to running)
+update_process(#{status := <<"corrupted">>, process_id := ProcessId} = Process, Intent) ->
+    %% process repaired (transition from corrupted to active)
     StatusChangedAt = erlang:system_time(microsecond),
     NewProcess = maps:without(
         [detail, corrupted_by, corrupted_type],
-        Process#{status => <<"running">>, previous_status := <<"error">>, status_changed_at => StatusChangedAt}
+        Process#{status => <<"active">>, previous_status := <<"corrupted">>, status_changed_at => StatusChangedAt}
     ),
     ProcessUpdates = #{
         process_id => ProcessId,
-        status => <<"running">>,
-        previous_status => <<"error">>,
+        status => <<"active">>,
+        previous_status => <<"corrupted">>,
         status_changed_at => StatusChangedAt,
         detail => undefined,
         corrupted_by => undefined,
@@ -508,26 +508,26 @@ update_process(#{status := <<"error">>, process_id := ProcessId} = Process, Inte
     },
     update_process_from_intent(NewProcess, ProcessUpdates, Intent);
 update_process(#{status := <<"init">>, process_id := ProcessId} = Process, Intent) ->
-    %% transition from init to running
+    %% transition from init to active
     StatusChangedAt = erlang:system_time(microsecond),
     ProcessUpdates = #{
         process_id => ProcessId,
-        status => <<"running">>,
+        status => <<"active">>,
         previous_status => <<"init">>,
         status_changed_at => StatusChangedAt
     },
     NewProcess = maps:merge(Process, ProcessUpdates),
     update_process_from_intent(NewProcess, ProcessUpdates, Intent);
-update_process(#{previous_status := <<"init">>, status := <<"running">>, process_id := ProcessId} = Process, Intent) ->
-    %% first transition from running to running, need to update previous_status
+update_process(#{previous_status := <<"init">>, status := <<"active">>, process_id := ProcessId} = Process, Intent) ->
+    %% first transition from active to active, need to update previous_status
     ProcessUpdates = #{
         process_id => ProcessId,
-        status => <<"running">>,
-        previous_status => <<"running">>
+        status => <<"active">>,
+        previous_status => <<"active">>
     },
     NewProcess = maps:merge(Process, ProcessUpdates),
     update_process_from_intent(NewProcess, ProcessUpdates, Intent);
-update_process(#{status := <<"running">>, process_id := ProcessId} = Process, Intent) ->
+update_process(#{status := <<"active">>, process_id := ProcessId} = Process, Intent) ->
     %% normal work
     update_process_from_intent(Process, #{process_id => ProcessId}, Intent).
 
