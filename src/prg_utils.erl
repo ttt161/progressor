@@ -5,6 +5,7 @@
 %% API
 -export([registered_name/2]).
 -export([pipe/2]).
+-export([valid_identifier/1]).
 -export([format/1]).
 -export([make_ns_opts/2]).
 -export([unixtime_to_datetime/1]).
@@ -25,6 +26,16 @@
 -define(MAX_SECONDS, 100000000000).
 -define(MAX_MILLISECONDS, 100000000000000).
 -define(MAX_MICROSECONDS, 100000000000000000).
+
+-spec valid_identifier(term()) -> boolean().
+valid_identifier(Value) when is_binary(Value), byte_size(Value) > 0 ->
+    try
+        unicode:characters_to_binary(Value) =:= Value andalso binary:match(Value, <<0>>) =:= nomatch
+    catch
+        _:_ -> false
+    end;
+valid_identifier(_) ->
+    false.
 
 -spec registered_name(atom(), string()) -> atom().
 registered_name(BaseAtom, PostfixStr) ->

@@ -730,21 +730,29 @@ lookup_processes(PgOpts, NsId, Predicate, Params) ->
     case epg_pool:query(get_pool(external, PgOpts), SQL, Params) of
         {ok, Columns, Rows} ->
             {ProcColumns, StateColumns} = lists:split(length(Columns) - 6, Columns),
-            merge_lookup_rows(ProcColumns, StateColumns, Rows, []);
+            merge_lookup_rows({NsId, ProcColumns}, StateColumns, Rows, []);
         {error, _} = Error ->
             Error
     end.
 
 merge_lookup_rows(_ProcColumns, _StateColumns, [], Acc) ->
     {ok, lists:reverse(Acc)};
-merge_lookup_rows(ProcColumns, StateColumns, [Row | Rows], Acc) ->
+merge_lookup_rows({NsId, ProcColumns} = Context, StateColumns, [Row | Rows], Acc) ->
     {ProcValues, StateValues} = lists:split(length(ProcColumns), tuple_to_list(Row)),
     [Process] = to_maps(ProcColumns, [list_to_tuple(ProcValues)], fun prg_pg_utils:marshal_process/1),
     [State] = to_maps(StateColumns, [list_to_tuple(StateValues)], fun prg_pg_utils:marshal_process_state/1),
     case {maps:find(current_generation, Process), maps:is_key(generation, State)} of
-        {{ok, Generation}, false} -> {error, {current_generation_not_found, Generation}};
-        {_, true} -> merge_lookup_rows(ProcColumns, StateColumns, Rows, [Process#{state => State} | Acc]);
-        {error, false} -> merge_lookup_rows(ProcColumns, StateColumns, Rows, [Process | Acc])
+        {{ok, Generation}, false} ->
+            logger:warning(
+                "Skipping damaged lookup record: namespace=~p process_id=~p generation=~p",
+                [NsId, maps:get(process_id, Process), Generation]
+            ),
+            prometheus_counter:inc(progressor_lookup_skipped_damaged_records_counter, [atom_to_binary(NsId, utf8)]),
+            merge_lookup_rows(Context, StateColumns, Rows, Acc);
+        {_, true} ->
+            merge_lookup_rows(Context, StateColumns, Rows, [Process#{state => State} | Acc]);
+        {error, false} ->
+            merge_lookup_rows(Context, StateColumns, Rows, [Process | Acc])
     end.
 
 generation_condition(latest) ->

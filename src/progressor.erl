@@ -106,24 +106,38 @@ get(Req0) ->
     ).
 
 -spec get_by_sub_id(namespace_id(), binary(), binary()) -> {ok, [process()]} | {error, term()}.
-get_by_sub_id(Ns, Subnamespace, SubId) when
-    is_atom(Ns), is_binary(Subnamespace), byte_size(Subnamespace) > 0, is_binary(SubId), byte_size(SubId) > 0
-->
-    lookup(Ns, fun(Storage) -> prg_storage:get_by_sub_id(Storage, Ns, Subnamespace, SubId) end);
-get_by_sub_id(_, _, _) ->
-    {error, invalid_lookup_arguments}.
+get_by_sub_id(Ns, Subnamespace, SubId) ->
+    case is_atom(Ns) andalso prg_utils:valid_identifier(Subnamespace) andalso prg_utils:valid_identifier(SubId) of
+        true ->
+            lookup(
+                Ns,
+                progressor_get_by_sub_id_duration_ms,
+                fun(Storage) -> prg_storage:get_by_sub_id(Storage, Ns, Subnamespace, SubId) end
+            );
+        false ->
+            {error, invalid_lookup_arguments}
+    end.
 
 -spec get_by_alias(namespace_id(), binary()) -> {ok, [process()]} | {error, term()}.
-get_by_alias(Ns, Alias) when is_atom(Ns), is_binary(Alias), byte_size(Alias) > 0 ->
-    lookup(Ns, fun(Storage) -> prg_storage:get_by_alias(Storage, Ns, Alias) end);
-get_by_alias(_, _) ->
-    {error, invalid_lookup_arguments}.
+get_by_alias(Ns, Alias) ->
+    case is_atom(Ns) andalso prg_utils:valid_identifier(Alias) of
+        true ->
+            lookup(
+                Ns,
+                progressor_get_by_alias_duration_ms,
+                fun(Storage) -> prg_storage:get_by_alias(Storage, Ns, Alias) end
+            );
+        false ->
+            {error, invalid_lookup_arguments}
+    end.
 
-lookup(Ns, Fun) ->
+lookup(Ns, Metric, Fun) ->
     prg_utils:pipe(
         [
             fun add_ns_opts/1,
-            fun(#{ns_opts := #{storage := Storage}}) -> Fun(Storage) end
+            fun(#{ns_opts := #{storage := Storage}}) ->
+                prg_utils:with_observe(fun() -> Fun(Storage) end, Metric, [atom_to_binary(Ns, utf8)])
+            end
         ],
         #{ns => Ns}
     ).

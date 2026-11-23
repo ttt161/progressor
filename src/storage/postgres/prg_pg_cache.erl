@@ -232,7 +232,7 @@ do_get(NsID, ProcessID, Generation) ->
     case ets:lookup(ProcessesTable, ProcessID) of
         [] ->
             undefined;
-        [{_, ProcessRaw}] when map_get(<<"aliases">>, ProcessRaw) =:= [] ->
+        [{_, ProcessRaw}] ->
             case get_process_state(ets:lookup(GensTable, ProcessID), Generation) of
                 undefined ->
                     undefined;
@@ -245,16 +245,12 @@ do_get(NsID, ProcessID, Generation) ->
                                 (_, Value) ->
                                     Value
                             end,
-                            ProcessRaw
+                            maps:remove(<<"aliases">>, ProcessRaw)
                         )
                     ),
                     ProcessState = prg_pg_utils:marshal_process_state(convert_state(ProcessStateRaw)),
-                    {ok, Process#{state => ProcessState}}
-            end;
-        [_] ->
-            %% The WAL reader cannot decode all text arrays losslessly (e.g. NULLfoo).
-            %% Retain complete rows for updates, but read nonempty aliases from SQL.
-            undefined
+                    {ok, maps:remove(aliases, Process#{state => ProcessState})}
+            end
     end.
 
 process_operation({Table, _, _, _} = ReplData, State) ->
@@ -267,7 +263,8 @@ process_operation(<<"processes">>, NsID, {_Table, insert, #{<<"process_id">> := 
         processes := ProcessesTable,
         generations := GensTable
     } = tables(NsID),
-    true = ets:insert(ProcessesTable, {ProcessID, Row}),
+    %% WAL text arrays are lossy; aliases are only available through SQL reads.
+    true = ets:insert(ProcessesTable, {ProcessID, maps:remove(<<"aliases">>, Row)}),
     reset_timer([ProcessesTable, GensTable], ProcessID, State);
 process_operation(<<"generations">>, NsID, {_Table, insert, #{<<"process_id">> := ProcessID} = Row, _}, State) ->
     #{
@@ -291,7 +288,7 @@ process_operation(<<"processes">>, NsID, {_Table, update, #{<<"process_id">> := 
     } = tables(NsID),
     case ets:lookup(ProcessesTable, ProcessID) of
         [{_, OldRow}] ->
-            true = ets:insert(ProcessesTable, {ProcessID, maps:merge(OldRow, Row)}),
+            true = ets:insert(ProcessesTable, {ProcessID, maps:remove(<<"aliases">>, maps:merge(OldRow, Row))}),
             reset_timer([ProcessesTable, GensTable], ProcessID, State);
         [] ->
             State

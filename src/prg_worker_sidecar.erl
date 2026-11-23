@@ -315,7 +315,7 @@ validate_lookup_fields(Intent, Process) ->
     Valid =
         valid_optional_identifier(Subnamespace) andalso valid_optional_identifier(SubId) andalso
             (SubId =:= undefined orelse Subnamespace =/= undefined) andalso
-            is_list(Aliases) andalso lists:all(fun valid_identifier/1, Aliases),
+            is_list(Aliases) andalso lists:all(fun prg_utils:valid_identifier/1, Aliases),
     case Valid of
         true ->
             case maps:is_key(aliases, Intent) of
@@ -327,9 +327,7 @@ validate_lookup_fields(Intent, Process) ->
     end.
 
 valid_optional_identifier(undefined) -> true;
-valid_optional_identifier(Value) -> valid_identifier(Value).
-
-valid_identifier(Value) -> is_binary(Value) andalso byte_size(Value) > 0.
+valid_optional_identifier(Value) -> prg_utils:valid_identifier(Value).
 
 validate_intent_state(#{action := remove}) ->
     ok;

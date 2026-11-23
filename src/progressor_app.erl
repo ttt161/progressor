@@ -51,6 +51,25 @@ start_namespace(NsID, NsOpts) ->
 %% internal functions
 
 create_metrics() ->
+    lists:foreach(
+        fun({Name, Help}) ->
+            _ = prometheus_histogram:declare([
+                {name, Name},
+                {help, Help},
+                {buckets, [50, 150, 300, 500, 750, 1000]},
+                {labels, [prg_namespace]}
+            ])
+        end,
+        [
+            {progressor_get_by_sub_id_duration_ms, "Process lookup (get_by_sub_id) durations in millisecond"},
+            {progressor_get_by_alias_duration_ms, "Process lookup (get_by_alias) durations in millisecond"}
+        ]
+    ),
+    _ = prometheus_counter:declare([
+        {name, progressor_lookup_skipped_damaged_records_counter},
+        {help, "Lookup records skipped because their current generation is missing"},
+        {labels, [prg_namespace]}
+    ]),
     _ = prometheus_histogram:declare([
         {name, progressor_get_duration_ms},
         {help, "Process reading (get) durations in millisecond"},

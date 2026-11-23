@@ -3,11 +3,34 @@
 -include_lib("stdlib/include/assert.hrl").
 
 -export([all/0, init_per_suite/1, end_per_suite/1]).
--export([lookups/1, updates/1, invalid_intents/1, constraints/1, init_without_snapshot/1, arguments/1, cache/1]).
+-export([
+    lookups/1,
+    updates/1,
+    invalid_intents/1,
+    constraints/1,
+    init_without_snapshot/1,
+    arguments/1,
+    cache/1,
+    damaged_rows/1,
+    metrics/1,
+    unicode_identifiers/1
+]).
 
 -define(NS, 'default/default').
 
-all() -> [lookups, updates, invalid_intents, constraints, init_without_snapshot, arguments, cache].
+all() ->
+    [
+        lookups,
+        updates,
+        invalid_intents,
+        constraints,
+        init_without_snapshot,
+        arguments,
+        cache,
+        damaged_rows,
+        metrics,
+        unicode_identifiers
+    ].
 
 init_per_suite(Config) ->
     _ = prg_ct_hook:start_applications(),
@@ -65,18 +88,31 @@ updates(_) ->
     ?assertEqual({ok, []}, progressor:get_by_sub_id(?NS, <<"again">>, <<"id">>)).
 
 invalid_intents(_) ->
-    Invalid = [
-        #{subnamespace => undefined},
-        #{subnamespace => <<>>},
-        #{sub_id => <<>>},
-        #{sub_id => null},
-        #{subnamespace => 1},
-        #{aliases => undefined},
-        #{aliases => <<"x">>},
-        #{aliases => [null]},
-        #{aliases => [<<>>]},
-        #{aliases => [[1]]}
-    ],
+    ct:timetrap({seconds, 20}),
+    Invalid =
+        [
+            #{Field => Value}
+         || Field <- [subnamespace, sub_id, aliases],
+            Bad <- [<<0>>, <<"a", 0, "b">>, <<255>>, <<16#C3>>],
+            Value <- [
+                case Field of
+                    aliases -> [Bad];
+                    _ -> Bad
+                end
+            ]
+        ] ++
+            [
+                #{subnamespace => undefined},
+                #{subnamespace => <<>>},
+                #{sub_id => <<>>},
+                #{sub_id => null},
+                #{subnamespace => 1},
+                #{aliases => undefined},
+                #{aliases => <<"x">>},
+                #{aliases => [null]},
+                #{aliases => [<<>>]},
+                #{aliases => [[1]]}
+            ],
     lists:foreach(
         fun(Fields) ->
             Id = create(?NS, #{subnamespace => <<"valid">>, sub_id => <<"id">>}),
@@ -149,7 +185,7 @@ arguments(_) ->
             ?assertEqual({error, invalid_lookup_arguments}, progressor:get_by_sub_id(?NS, Value, <<"id">>)),
             ?assertEqual({error, invalid_lookup_arguments}, progressor:get_by_sub_id(?NS, <<"ns">>, Value))
         end,
-        [<<>>, undefined, null, "text", 1]
+        [<<>>, undefined, null, "text", 1, <<0>>, <<"a", 0, "b">>, <<255>>, <<16#C3>>]
     ),
     lists:foreach(
         fun(Ns) ->
@@ -177,37 +213,39 @@ cache(_) ->
         <<" space ">>
     ],
     Id = create(Ns, #{subnamespace => <<"cache">>, sub_id => <<"id">>, aliases => Aliases}),
-    await_cached_row(Id, 1, 100),
-    ?assertEqual(undefined, prg_pg_cache:get(Ns, Id, latest)),
-    {ok, P} = progressor:get(#{ns => Ns, id => Id}),
-    ?assertEqual({ok, P}, get(Ns, Id)),
-    ?assertEqual(lists:sort(Aliases), lists:sort(maps:get(aliases, P))),
+    P = assert_cached(Ns, Id, 1, Aliases),
     ?assertEqual(<<"cache">>, maps:get(subnamespace, P)),
     {ok, ok} = update(Ns, Id, #{subnamespace => undefined, sub_id => undefined, aliases => []}),
     Cleared = await_cache(Ns, Id, 2, 100),
     ?assertNot(maps:is_key(subnamespace, Cleared)),
     ?assertNot(maps:is_key(sub_id, Cleared)),
-    ?assertEqual([], maps:get(aliases, Cleared)),
-    ?assertEqual({ok, Cleared}, get(Ns, Id)),
+    ?assertNot(maps:is_key(aliases, Cleared)),
+    assert_cached(Ns, Id, 2, []),
     {ok, ok} = update(Ns, Id, #{aliases => [<<"NULLfoo">>]}),
-    await_cached_row(Id, 3, 100),
-    ?assertEqual(undefined, prg_pg_cache:get(Ns, Id, latest)),
-    ?assertEqual(get(Ns, Id), progressor:get(#{ns => Ns, id => Id})),
+    assert_cached(Ns, Id, 3, [<<"NULLfoo">>]),
     {ok, ok} = update(Ns, Id, #{}),
-    await_cached_row(Id, 4, 100),
-    ?assertEqual(undefined, prg_pg_cache:get(Ns, Id, latest)),
-    ?assertEqual(get(Ns, Id), progressor:get(#{ns => Ns, id => Id})).
+    assert_cached(Ns, Id, 4, [<<"NULLfoo">>]).
 
-await_cached_row(_, _, 0) ->
-    ct:fail(cache_row_not_updated);
-await_cached_row(Id, Generation, Attempts) ->
-    case ets:lookup('cached/namespace_processes', Id) of
-        [{_, #{<<"current_generation">> := Generation}}] ->
-            ok;
-        _ ->
-            timer:sleep(20),
-            await_cached_row(Id, Generation, Attempts - 1)
-    end.
+assert_cached(Ns, Id, Generation, Aliases) ->
+    P = await_cache(Ns, Id, Generation, 100),
+    ?assertNot(maps:is_key(aliases, P)),
+    [{_, Raw}] = ets:lookup('cached/namespace_processes', Id),
+    ?assertNot(maps:is_key(<<"aliases">>, Raw)),
+    Labels = [atom_to_binary(Ns)],
+    Hits = prometheus_counter:value(progressor_cache_hit_counter, Labels),
+    ?assertEqual({ok, P}, progressor:get(#{ns => Ns, id => Id})),
+    ?assertEqual(Hits + 1, prometheus_counter:value(progressor_cache_hit_counter, Labels)),
+    {ok, SQL} = get(Ns, Id),
+    ?assertEqual(P, maps:remove(aliases, SQL)),
+    ?assertEqual(lists:sort(Aliases), maps:get(aliases, SQL)),
+    lists:foreach(
+        fun(Alias) ->
+            {ok, Matches} = progressor:get_by_alias(Ns, Alias),
+            ?assert(lists:member(SQL, Matches))
+        end,
+        Aliases
+    ),
+    P.
 
 await_cache(_, _, _, 0) ->
     ct:fail(cache_not_updated);
@@ -219,6 +257,56 @@ await_cache(Ns, Id, Generation, Attempts) ->
             timer:sleep(20),
             await_cache(Ns, Id, Generation, Attempts - 1)
     end.
+
+damaged_rows(_) ->
+    Fields = #{subnamespace => <<"pending">>, sub_id => <<"id">>, aliases => [<<"pending">>]},
+    Good = create(?NS, Fields),
+    Bad = create(?NS, Fields),
+    #{generations := Table} = prg_pg_utils:tables(?NS),
+    {ok, 1} = epg_pool:query(default_pool, "DELETE FROM " ++ Table ++ " WHERE process_id = $1", [Bad]),
+    Metric = progressor_lookup_skipped_damaged_records_counter,
+    Labels = [atom_to_binary(?NS)],
+    prometheus_counter:inc(Metric, Labels, 0),
+    Before = prometheus_counter:value(Metric, Labels),
+    {ok, Matches} = progressor:get_by_alias(?NS, <<"pending">>),
+    ?assert(lists:member(Good, ids(Matches))),
+    ?assertNot(lists:member(Bad, ids(Matches))),
+    ?assertMatch([#{status := <<"init">>}], [P || P <- Matches, not maps:is_key(current_generation, P)]),
+    {ok, SubMatches} = progressor:get_by_sub_id(?NS, <<"pending">>, <<"id">>),
+    ?assertEqual(lists:sort(Matches), lists:sort(SubMatches)),
+    ?assertEqual(Before + 2, prometheus_counter:value(Metric, Labels)),
+    #{processes := Processes} = prg_pg_utils:tables(?NS),
+    {ok, 1} = epg_pool:query(
+        default_pool,
+        "UPDATE " ++ Processes ++ " SET aliases = ARRAY['only-damaged'] WHERE process_id = $1",
+        [Bad]
+    ),
+    ?assertEqual({ok, []}, progressor:get_by_alias(?NS, <<"only-damaged">>)).
+
+metrics(_) ->
+    lists:foreach(
+        fun({Metric, Fun}) ->
+            Labels = [atom_to_binary(?NS)],
+            {Before, _} = prometheus_histogram:value(Metric, Labels),
+            ?assertEqual({ok, []}, Fun()),
+            {After, _} = prometheus_histogram:value(Metric, Labels),
+            ?assertEqual(lists:sum(Before) + 1, lists:sum(After))
+        end,
+        [
+            {progressor_get_by_alias_duration_ms, fun() -> progressor:get_by_alias(?NS, <<"metric-missing">>) end},
+            {progressor_get_by_sub_id_duration_ms, fun() ->
+                progressor:get_by_sub_id(?NS, <<"metric-missing">>, <<"id">>)
+            end}
+        ]
+    ).
+
+unicode_identifiers(_) ->
+    Value = unicode:characters_to_binary([16#4E16, 16#754C, 16#1F600]),
+    Id = create(?NS, #{subnamespace => Value, sub_id => Value, aliases => [Value]}),
+    {ok, [P]} = progressor:get_by_alias(?NS, Value),
+    ?assertEqual(Id, maps:get(process_id, P)),
+    ?assertEqual([Value], maps:get(aliases, P)),
+    ?assertEqual({ok, [P]}, progressor:get_by_sub_id(?NS, Value, Value)).
 
 create(Ns, Fields) ->
     Id = id(),
@@ -233,7 +321,7 @@ get(Ns, Id) -> progressor:get(#{ns => Ns, id => Id, options => #{use_cache => fa
 intent(Fields) ->
     Fields#{
         state => #{
-            timestamp => erlang:system_time(microsecond),
+            timestamp => erlang:system_time(second) * 1000000,
             payload => <<"snapshot">>,
             metadata => #{<<"snapshot">> => true}
         }
