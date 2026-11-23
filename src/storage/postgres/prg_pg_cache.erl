@@ -232,7 +232,7 @@ do_get(NsID, ProcessID, Generation) ->
     case ets:lookup(ProcessesTable, ProcessID) of
         [] ->
             undefined;
-        [{_, ProcessRaw}] ->
+        [{_, ProcessRaw}] when map_get(<<"aliases">>, ProcessRaw) =:= [] ->
             case get_process_state(ets:lookup(GensTable, ProcessID), Generation) of
                 undefined ->
                     undefined;
@@ -250,7 +250,11 @@ do_get(NsID, ProcessID, Generation) ->
                     ),
                     ProcessState = prg_pg_utils:marshal_process_state(convert_state(ProcessStateRaw)),
                     {ok, Process#{state => ProcessState}}
-            end
+            end;
+        [_] ->
+            %% The WAL reader cannot decode all text arrays losslessly (e.g. NULLfoo).
+            %% Retain complete rows for updates, but read nonempty aliases from SQL.
+            undefined
     end.
 
 process_operation({Table, _, _, _} = ReplData, State) ->

@@ -34,6 +34,7 @@
 -export([get_task/3]).
 -export([get_task/4]).
 -export([get_process/3]).
+-export([get_by_sub_id/4, get_by_alias/3]).
 -export([get_process/4]).
 -export([get_process/5]).
 
@@ -140,6 +141,14 @@ get_task(StorageOpts, NsId, TaskId) ->
     {ok, task()} | {error, _Reason}.
 get_task(Recipient, #{client := Handler, options := HandlerOpts}, NsId, TaskId) ->
     Handler:get_task(Recipient, HandlerOpts, NsId, TaskId).
+
+-spec get_by_sub_id(storage_opts(), namespace_id(), binary(), binary()) -> {ok, [process()]} | {error, term()}.
+get_by_sub_id(#{client := Handler, options := Options}, Ns, Subnamespace, SubId) ->
+    Handler:get_by_sub_id(Options, Ns, Subnamespace, SubId).
+
+-spec get_by_alias(storage_opts(), namespace_id(), binary()) -> {ok, [process()]} | {error, term()}.
+get_by_alias(#{client := Handler, options := Options}, Ns, Alias) ->
+    Handler:get_by_alias(Options, Ns, Alias).
 
 -spec get_process(storage_opts(), namespace_id(), id()) -> {ok, process()} | {error, _Reason}.
 get_process(StorageOpts, NsId, ProcessId) ->

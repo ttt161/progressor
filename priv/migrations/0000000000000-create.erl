@@ -66,12 +66,27 @@ perform(Connection, MigrationOpts) ->
             "status process_status NOT NULL, "
             "detail TEXT, "
             "aux_state BYTEA, "
+            "subnamespace TEXT CHECK (subnamespace <> ''), "
+            "sub_id TEXT CHECK (sub_id <> ''), "
+            "aliases TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[] "
+            "CHECK (array_position(aliases, '') IS NULL AND array_position(aliases, NULL) IS NULL), "
+            "CHECK (sub_id IS NULL OR subnamespace IS NOT NULL), "
             "current_generation INTEGER, "
             "corrupted_type task_type, "
             "previous_status process_status NOT NULL, "
             "status_changed_at TIMESTAMP WITH TIME ZONE NOT NULL, "
             "created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(), "
             "metadata JSONB)"
+    ),
+    lists:foreach(
+        fun({Suffix, Definition}) ->
+            Index = "\"" ++ atom_to_list(NsId) ++ "_processes_" ++ Suffix ++ "\"",
+            {ok, _, _} = epg_pool:query(Connection,
+                "CREATE INDEX " ++ Index ++ " ON " ++ ProcessesTable ++ Definition)
+        end,
+        [{"subnamespace_idx", " (subnamespace)"},
+         {"sub_id_idx", " (subnamespace, sub_id)"},
+         {"aliases_idx", " USING GIN (aliases)"}]
     ),
     %% create tasks table
     {ok, _, _} = epg_pool:query(

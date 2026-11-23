@@ -6,6 +6,9 @@
     status,
     detail,
     aux_state,
+    subnamespace,
+    sub_id,
+    aliases,
     metadata,
     corrupted_by,
     corrupted_type,
@@ -18,6 +21,9 @@
     process_id := id(),
     status := process_status(),
     detail => binary(),
+    subnamespace => binary(),
+    sub_id => binary(),
+    aliases => [binary()],
     aux_state => binary(),
     metadata => map(),
     state => process_state(),
@@ -135,6 +141,9 @@
 
 -type processor_intent() ::
     #{
+        subnamespace => binary() | undefined,
+        sub_id => binary() | undefined,
+        aliases => [binary()],
         state := processor_state(),
         action => action(),
         response => term(),
@@ -142,6 +151,9 @@
         metadata => map()
     }
     | #{
+        subnamespace => binary() | undefined,
+        sub_id => binary() | undefined,
+        aliases => [binary()],
         action := remove,
         state => processor_state() | undefined,
         response => term(),
@@ -235,6 +247,7 @@
 
 -define(NEW_PROCESS(ID), #{
     process_id => ProcessId,
+    aliases => [],
     status => <<"init">>,
     previous_status => <<"init">>,
     created_at => erlang:system_time(microsecond),

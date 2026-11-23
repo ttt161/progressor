@@ -1,5 +1,7 @@
 -module(prg_pg_backend).
 
+-export([get_by_sub_id/4, get_by_alias/3]).
+
 -include_lib("epgsql/include/epgsql.hrl").
 -include_lib("progressor/include/progressor.hrl").
 
@@ -710,6 +712,40 @@ cleanup(PgOpts, NsId) ->
 %-endif.
 
 %% Internal functions
+
+-spec get_by_sub_id(pg_opts(), namespace_id(), binary(), binary()) -> {ok, [process()]} | {error, term()}.
+get_by_sub_id(PgOpts, NsId, Subnamespace, SubId) ->
+    lookup_processes(PgOpts, NsId, "p.subnamespace = $1 AND p.sub_id = $2", [Subnamespace, SubId]).
+
+-spec get_by_alias(pg_opts(), namespace_id(), binary()) -> {ok, [process()]} | {error, term()}.
+get_by_alias(PgOpts, NsId, Alias) ->
+    lookup_processes(PgOpts, NsId, "p.aliases @> ARRAY[$1]::text[]", [Alias]).
+
+lookup_processes(PgOpts, NsId, Predicate, Params) ->
+    #{processes := Processes, generations := Generations} = prg_pg_utils:tables(NsId),
+    SQL =
+        "SELECT p.*, g.process_id, g.task_id, g.generation, g.timestamp, g.metadata, g.payload FROM " ++
+            Processes ++ " p LEFT JOIN " ++ Generations ++
+            " g ON g.process_id = p.process_id AND g.generation = p.current_generation WHERE " ++ Predicate,
+    case epg_pool:query(get_pool(external, PgOpts), SQL, Params) of
+        {ok, Columns, Rows} ->
+            {ProcColumns, StateColumns} = lists:split(length(Columns) - 6, Columns),
+            merge_lookup_rows(ProcColumns, StateColumns, Rows, []);
+        {error, _} = Error ->
+            Error
+    end.
+
+merge_lookup_rows(_ProcColumns, _StateColumns, [], Acc) ->
+    {ok, lists:reverse(Acc)};
+merge_lookup_rows(ProcColumns, StateColumns, [Row | Rows], Acc) ->
+    {ProcValues, StateValues} = lists:split(length(ProcColumns), tuple_to_list(Row)),
+    [Process] = to_maps(ProcColumns, [list_to_tuple(ProcValues)], fun prg_pg_utils:marshal_process/1),
+    [State] = to_maps(StateColumns, [list_to_tuple(StateValues)], fun prg_pg_utils:marshal_process_state/1),
+    case {maps:find(current_generation, Process), maps:is_key(generation, State)} of
+        {{ok, Generation}, false} -> {error, {current_generation_not_found, Generation}};
+        {_, true} -> merge_lookup_rows(ProcColumns, StateColumns, Rows, [Process#{state => State} | Acc]);
+        {error, false} -> merge_lookup_rows(ProcColumns, StateColumns, Rows, [Process | Acc])
+    end.
 
 generation_condition(latest) ->
     " ORDER BY generation DESC LIMIT 1";

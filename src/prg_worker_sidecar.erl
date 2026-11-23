@@ -174,7 +174,7 @@ handle_call(
     {
         process,
         #{processor := #{client := Handler, options := Options}, namespace := _NsName} = _NsOpts,
-        Request,
+        {_, _, Process} = Request,
         Ctx
     },
     _From,
@@ -185,7 +185,7 @@ handle_call(
             case Handler:process(Request, Options, Ctx) of
                 {ok, Intent} ->
                     ok = validate_intent_state(Intent),
-                    {ok, Intent};
+                    {ok, validate_lookup_fields(Intent, Process)};
                 {error, Reason} = ERR ->
                     logger:error("processor error: ~p", [Reason]),
                     ERR;
@@ -306,6 +306,30 @@ do_with_retry(Fun, Delay) ->
 add_handling_timeout(Timeout, #{processor := ProcessorConf} = NsOpts) ->
     ProcessorOpts = maps:get(options, ProcessorConf, #{}),
     NsOpts#{processor => ProcessorConf#{options => ProcessorOpts#{handling_timeout => Timeout}}}.
+
+validate_lookup_fields(Intent, Process) ->
+    Merged = maps:merge(Process, Intent),
+    Subnamespace = maps:get(subnamespace, Merged, undefined),
+    SubId = maps:get(sub_id, Merged, undefined),
+    Aliases = maps:get(aliases, Merged, []),
+    Valid =
+        valid_optional_identifier(Subnamespace) andalso valid_optional_identifier(SubId) andalso
+            (SubId =:= undefined orelse Subnamespace =/= undefined) andalso
+            is_list(Aliases) andalso lists:all(fun valid_identifier/1, Aliases),
+    case Valid of
+        true ->
+            case maps:is_key(aliases, Intent) of
+                true -> Intent#{aliases => lists:usort(Aliases)};
+                false -> Intent
+            end;
+        false ->
+            error({invalid_processor_fields, invalid_lookup_fields})
+    end.
+
+valid_optional_identifier(undefined) -> true;
+valid_optional_identifier(Value) -> valid_identifier(Value).
+
+valid_identifier(Value) -> is_binary(Value) andalso byte_size(Value) > 0.
 
 validate_intent_state(#{action := remove}) ->
     ok;

@@ -7,8 +7,17 @@ CREATE TABLE IF NOT EXISTS default_processes(
     "status" process_status NOT NULL,
     "detail" TEXT,
     "aux_state" BYTEA,
+    subnamespace TEXT CHECK (subnamespace <> ''),
+    sub_id TEXT CHECK (sub_id <> ''),
+    aliases TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[]
+        CHECK (array_position(aliases, '') IS NULL AND array_position(aliases, NULL) IS NULL),
+    CHECK (sub_id IS NULL OR subnamespace IS NOT NULL),
     "metadata" JSONB
 );
+
+CREATE INDEX default_processes_subnamespace_idx ON default_processes (subnamespace);
+CREATE INDEX default_processes_sub_id_idx ON default_processes (subnamespace, sub_id);
+CREATE INDEX default_processes_aliases_idx ON default_processes USING GIN (aliases);
 
 CREATE TABLE IF NOT EXISTS default_tasks(
     "task_id" BIGSERIAL PRIMARY KEY,

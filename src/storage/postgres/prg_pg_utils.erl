@@ -27,6 +27,9 @@ marshal_process(Process) ->
             (<<"status">>, Status, Acc) -> Acc#{status => Status};
             (<<"detail">>, Detail, Acc) -> Acc#{detail => Detail};
             (<<"aux_state">>, AuxState, Acc) -> Acc#{aux_state => AuxState};
+            (<<"subnamespace">>, Value, Acc) -> Acc#{subnamespace => Value};
+            (<<"sub_id">>, Value, Acc) -> Acc#{sub_id => Value};
+            (<<"aliases">>, Value, Acc) -> Acc#{aliases => Value};
             (<<"metadata">>, Meta, Acc) -> Acc#{metadata => Meta};
             (<<"previous_status">>, Status, Acc) -> Acc#{previous_status => Status};
             (<<"status_changed_at">>, Ts, Acc) -> Acc#{status_changed_at => Ts};

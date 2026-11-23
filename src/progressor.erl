@@ -12,6 +12,7 @@
 -export([repair/1]).
 -export([simple_repair/1]).
 -export([get/1]).
+-export([get_by_sub_id/3, get_by_alias/2]).
 -export([trace/1]).
 -export([health_check/1]).
 %% TODO
@@ -102,6 +103,29 @@ get(Req0) ->
             fun(Data) -> do_get(Data) end
         ],
         Req
+    ).
+
+-spec get_by_sub_id(namespace_id(), binary(), binary()) -> {ok, [process()]} | {error, term()}.
+get_by_sub_id(Ns, Subnamespace, SubId) when
+    is_atom(Ns), is_binary(Subnamespace), byte_size(Subnamespace) > 0, is_binary(SubId), byte_size(SubId) > 0
+->
+    lookup(Ns, fun(Storage) -> prg_storage:get_by_sub_id(Storage, Ns, Subnamespace, SubId) end);
+get_by_sub_id(_, _, _) ->
+    {error, invalid_lookup_arguments}.
+
+-spec get_by_alias(namespace_id(), binary()) -> {ok, [process()]} | {error, term()}.
+get_by_alias(Ns, Alias) when is_atom(Ns), is_binary(Alias), byte_size(Alias) > 0 ->
+    lookup(Ns, fun(Storage) -> prg_storage:get_by_alias(Storage, Ns, Alias) end);
+get_by_alias(_, _) ->
+    {error, invalid_lookup_arguments}.
+
+lookup(Ns, Fun) ->
+    prg_utils:pipe(
+        [
+            fun add_ns_opts/1,
+            fun(#{ns_opts := #{storage := Storage}}) -> Fun(Storage) end
+        ],
+        #{ns => Ns}
     ).
 
 -spec trace(request()) -> {ok, _Result :: term()} | {error, _Reason :: term()}.
